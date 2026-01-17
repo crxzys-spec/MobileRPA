@@ -241,43 +241,6 @@ def _coerce_list(value: Any) -> Any:
     return value
 
 
-def _make_json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, bytes):
-        try:
-            return value.decode("utf-8")
-        except Exception:
-            return value.decode("utf-8", errors="ignore")
-    if hasattr(value, "tolist"):
-        try:
-            value = value.tolist()
-        except Exception:
-            pass
-    if isinstance(value, dict):
-        return {str(key): _make_json_safe(val) for key, val in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [_make_json_safe(item) for item in value]
-    return str(value)
-
-
-def _serialize_raw_result(result: Any) -> Any:
-    if result is None:
-        return None
-    if isinstance(result, list):
-        serialized = []
-        for item in result:
-            data = _result_to_dict(item)
-            serialized.append(_make_json_safe(data if data is not None else item))
-        return serialized
-    data = _result_to_dict(result)
-    if data is not None:
-        return _make_json_safe(data)
-    if not isinstance(result, list) and isinstance(result, Iterable):
-        return _make_json_safe(list(result))
-    return _make_json_safe(result)
-
-
 def _extract_text(line: Any) -> Optional[Tuple[Any, str, float]]:
     if isinstance(line, dict):
         box = (
@@ -594,7 +557,6 @@ async def ocr_endpoint(
     device: Optional[str] = Form(None),
     offset_x: int = Form(0),
     offset_y: int = Form(0),
-    raw: bool = Form(False),
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ) -> Dict[str, Any]:
     _check_api_key(x_api_key)
@@ -611,6 +573,4 @@ async def ocr_endpoint(
         "elements": elements,
         "meta": {"width": width, "height": height, "lang": lang, "device": device},
     }
-    if raw:
-        payload["raw_result"] = _serialize_raw_result(result)
     return payload
