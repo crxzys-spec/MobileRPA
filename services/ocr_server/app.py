@@ -262,7 +262,7 @@ def _extract_text(line: Any) -> Optional[Tuple[Any, str, float]]:
 
 
 def _bounds_from_box(box: Any) -> Optional[List[int]]:
-    if not box:
+    if box is None:
         return None
     xs = [point[0] for point in box if isinstance(point, (list, tuple)) and len(point) >= 2]
     ys = [point[1] for point in box if isinstance(point, (list, tuple)) and len(point) >= 2]

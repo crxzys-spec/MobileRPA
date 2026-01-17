@@ -808,7 +808,7 @@ def _get_value(mapping, keys, default):
 
 
 def bounds_from_box(box):
-    if not box:
+    if box is None:
         return None
     xs = [
         point[0]
