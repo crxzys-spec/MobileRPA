@@ -191,7 +191,7 @@ def _normalize_result(result: Any) -> List[Any]:
         if result and all(isinstance(item, dict) for item in result):
             flattened = []
             for item in result:
-                for key in ("ocr_result", "result", "data"):
+                for key in ("ocr_result", "result", "data", "res"):
                     value = item.get(key)
                     if isinstance(value, list):
                         flattened.extend(value)
@@ -200,10 +200,12 @@ def _normalize_result(result: Any) -> List[Any]:
                     flattened.append(item)
             result = flattened
     if isinstance(result, dict):
-        for key in ("ocr_result", "result", "data"):
+        for key in ("ocr_result", "result", "data", "res"):
             if key in result:
                 result = result[key]
                 break
+        else:
+            return [result]
     if not isinstance(result, list) and isinstance(result, Iterable):
         result = list(result)
     if (
@@ -214,6 +216,17 @@ def _normalize_result(result: Any) -> List[Any]:
     ):
         result = result[0]
     return result if isinstance(result, list) else []
+
+
+def _coerce_list(value: Any) -> Any:
+    if value is None:
+        return None
+    if hasattr(value, "tolist"):
+        try:
+            return value.tolist()
+        except Exception:
+            return value
+    return value
 
 
 def _extract_text(line: Any) -> Optional[Tuple[Any, str, float]]:
@@ -271,7 +284,58 @@ def _parse_ocr_result(
     lines = _normalize_result(result)
     elements: List[Dict[str, Any]] = []
     used = set()
-    for index, line in enumerate(lines, start=1):
+    index = 0
+    for line in lines or []:
+        if isinstance(line, dict) and (
+            "rec_texts" in line or "rec_polys" in line or "rec_boxes" in line
+        ):
+            texts = _coerce_list(line.get("rec_texts") or [])
+            scores = _coerce_list(line.get("rec_scores") or [])
+            polys = _coerce_list(line.get("rec_polys") or line.get("dt_polys") or [])
+            boxes = _coerce_list(line.get("rec_boxes") or [])
+            for i, text in enumerate(texts):
+                score = scores[i] if i < len(scores) else 1.0
+                if text is None:
+                    continue
+                text = str(text).strip()
+                if not text or float(score) < score_threshold:
+                    continue
+                bounds = None
+                if polys and i < len(polys):
+                    bounds = _bounds_from_box(polys[i])
+                elif boxes and i < len(boxes):
+                    box = boxes[i]
+                    if isinstance(box, (list, tuple)) and len(box) == 4:
+                        bounds = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+                if not bounds:
+                    continue
+                if offset:
+                    dx, dy = offset
+                    bounds = [
+                        bounds[0] + dx,
+                        bounds[1] + dy,
+                        bounds[2] + dx,
+                        bounds[3] + dy,
+                    ]
+                index += 1
+                element_id = "ocr:{}".format(index)
+                while element_id in used:
+                    index += 1
+                    element_id = "ocr:{}".format(index)
+                used.add(element_id)
+                cx, cy = _center(bounds)
+                elements.append(
+                    {
+                        "id": element_id,
+                        "type": "text",
+                        "text": text,
+                        "bounds": bounds,
+                        "center": [cx, cy],
+                        "confidence": round(float(score), 3),
+                        "source": "ocr",
+                    }
+                )
+            continue
         extracted = _extract_text(line)
         if not extracted:
             continue
@@ -287,6 +351,7 @@ def _parse_ocr_result(
         if offset:
             dx, dy = offset
             bounds = [bounds[0] + dx, bounds[1] + dy, bounds[2] + dx, bounds[3] + dy]
+        index += 1
         element_id = "ocr:{}".format(index)
         while element_id in used:
             index += 1

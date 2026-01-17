@@ -787,6 +787,35 @@ def _result_to_dict(item):
     return None
 
 
+def _coerce_list(value):
+    if value is None:
+        return None
+    if hasattr(value, "tolist"):
+        try:
+            return value.tolist()
+        except Exception:
+            return value
+    return value
+
+
+def bounds_from_box(box):
+    if not box:
+        return None
+    xs = [
+        point[0]
+        for point in box
+        if isinstance(point, (list, tuple)) and len(point) >= 2
+    ]
+    ys = [
+        point[1]
+        for point in box
+        if isinstance(point, (list, tuple)) and len(point) >= 2
+    ]
+    if not xs or not ys:
+        return None
+    return [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
+
+
 def parse_ocr_result(result, score_threshold=0.5, offset=None):
     lines = result
     if isinstance(lines, list):
@@ -804,7 +833,7 @@ def parse_ocr_result(result, score_threshold=0.5, offset=None):
         if lines and all(isinstance(item, dict) for item in lines):
             flattened = []
             for item in lines:
-                for key in ("ocr_result", "result", "data"):
+                for key in ("ocr_result", "result", "data", "res"):
                     value = item.get(key)
                     if isinstance(value, list):
                         flattened.extend(value)
@@ -813,10 +842,12 @@ def parse_ocr_result(result, score_threshold=0.5, offset=None):
                     flattened.append(item)
             lines = flattened
     if isinstance(lines, dict):
-        for key in ("ocr_result", "result", "data"):
+        for key in ("ocr_result", "result", "data", "res"):
             if key in lines:
                 lines = lines[key]
                 break
+        else:
+            lines = [lines]
     if not isinstance(lines, list) and hasattr(lines, "__iter__"):
         lines = list(lines)
     if (
@@ -829,7 +860,47 @@ def parse_ocr_result(result, score_threshold=0.5, offset=None):
         lines = lines[0]
     elements = []
     used_ids = set()
-    for index, line in enumerate(lines or [], start=1):
+    index = 0
+    for line in lines or []:
+        if isinstance(line, dict) and (
+            "rec_texts" in line or "rec_polys" in line or "rec_boxes" in line
+        ):
+            texts = _coerce_list(line.get("rec_texts") or [])
+            scores = _coerce_list(line.get("rec_scores") or [])
+            polys = _coerce_list(line.get("rec_polys") or line.get("dt_polys") or [])
+            boxes = _coerce_list(line.get("rec_boxes") or [])
+            for i, text in enumerate(texts):
+                score = scores[i] if i < len(scores) else 1.0
+                if text is None:
+                    continue
+                text = str(text).strip()
+                if not text or float(score) < score_threshold:
+                    continue
+                bounds = None
+                if polys and i < len(polys):
+                    bounds = bounds_from_box(polys[i])
+                elif boxes and i < len(boxes):
+                    box = boxes[i]
+                    if isinstance(box, (list, tuple)) and len(box) == 4:
+                        bounds = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+                if not bounds:
+                    continue
+                bounds = offset_bounds(bounds, offset)
+                index += 1
+                element_id = unique_id("ocr:{}".format(index), used_ids)
+                center_x, center_y = bounds_center(bounds)
+                elements.append(
+                    {
+                        "id": element_id,
+                        "type": "text",
+                        "text": text,
+                        "bounds": bounds,
+                        "center": [center_x, center_y],
+                        "confidence": round(float(score), 3),
+                        "source": "ocr",
+                    }
+                )
+            continue
         if not line:
             continue
         box = None
@@ -882,6 +953,7 @@ def parse_ocr_result(result, score_threshold=0.5, offset=None):
             continue
         bounds = [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
         bounds = offset_bounds(bounds, offset)
+        index += 1
         element_id = unique_id("ocr:{}".format(index), used_ids)
         center_x, center_y = bounds_center(bounds)
         elements.append(
