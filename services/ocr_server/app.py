@@ -242,6 +242,13 @@ def _coerce_list(value: Any) -> Any:
 
 
 def _make_json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except Exception:
+            return value.decode("utf-8", errors="ignore")
     if hasattr(value, "tolist"):
         try:
             value = value.tolist()
@@ -251,7 +258,7 @@ def _make_json_safe(value: Any) -> Any:
         return {str(key): _make_json_safe(val) for key, val in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):
         return [_make_json_safe(item) for item in value]
-    return value
+    return str(value)
 
 
 def _serialize_raw_result(result: Any) -> Any:
