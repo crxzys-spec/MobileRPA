@@ -257,40 +257,11 @@ _RAW_DROP_KEYS = {
     "crop_img",
     "np_img",
 }
-_RAW_MAX_ARRAY_ITEMS = 10000
-_RAW_MAX_MATRIX_ITEMS = 200000
-
-
 class _RawDrop:
     pass
 
 
 _RAW_DROP = _RawDrop()
-
-
-def _is_large_matrix(value: Any) -> bool:
-    try:
-        first_len = len(value)
-    except Exception:
-        return False
-    if first_len <= 0:
-        return False
-    if first_len > _RAW_MAX_ARRAY_ITEMS:
-        return True
-    try:
-        first_item = value[0]
-    except Exception:
-        return False
-    if isinstance(first_item, list):
-        try:
-            second_len = len(first_item)
-        except Exception:
-            return False
-        if first_len * second_len > _RAW_MAX_MATRIX_ITEMS:
-            return True
-        if second_len > _RAW_MAX_ARRAY_ITEMS:
-            return True
-    return False
 
 
 def _sanitize_raw(value: Any, key: Optional[str] = None) -> Any:
@@ -301,7 +272,7 @@ def _sanitize_raw(value: Any, key: Optional[str] = None) -> Any:
     if isinstance(value, (bytes, bytearray, memoryview)):
         return _RAW_DROP
     if isinstance(value, np.ndarray):
-        if value.size > _RAW_MAX_ARRAY_ITEMS:
+        if key and key.lower() in _RAW_DROP_KEYS:
             return _RAW_DROP
         return value.tolist()
     if hasattr(value, "tolist"):
@@ -320,8 +291,6 @@ def _sanitize_raw(value: Any, key: Optional[str] = None) -> Any:
             cleaned[str(item_key)] = cleaned_value
         return cleaned
     if isinstance(value, (list, tuple, set, frozenset)):
-        if _is_large_matrix(value):
-            return _RAW_DROP
         cleaned_list = []
         for item in value:
             cleaned_item = _sanitize_raw(item)
