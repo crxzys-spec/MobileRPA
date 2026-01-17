@@ -1,4 +1,5 @@
 import argparse
+import base64
 import json
 import mimetypes
 import sys
@@ -59,6 +60,10 @@ def run_local(args):
     payload = {"elements": elements}
     if args.raw:
         payload["raw_result"] = ocr_app._serialize_raw_result(result)
+    if args.annotate or args.annotate_out:
+        annotated, _ = ocr_app._annotate_elements(screen, elements)
+        output_path = args.annotate_out or "annotated.png"
+        Path(output_path).write_bytes(ocr_app._encode_png(annotated))
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
@@ -75,6 +80,8 @@ def run_http(args):
         fields["device"] = args.device
     if args.raw:
         fields["raw"] = "1"
+    if args.annotate or args.annotate_out:
+        fields["annotate"] = "1"
     filename = Path(args.image).name or "image"
     boundary, body = build_multipart(
         fields, [("image", filename, image_bytes, mime)]
@@ -87,6 +94,12 @@ def run_http(args):
     with urllib.request.urlopen(request, timeout=args.timeout) as response:
         text = response.read().decode("utf-8")
     payload = json.loads(text)
+    if args.annotate or args.annotate_out:
+        data_uri = payload.get("annotated_image") if isinstance(payload, dict) else None
+        if isinstance(data_uri, str) and "," in data_uri:
+            _, b64 = data_uri.split(",", 1)
+            output_path = args.annotate_out or "annotated.png"
+            Path(output_path).write_bytes(base64.b64decode(b64))
     elements = payload.get("elements") if isinstance(payload, dict) else None
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -111,6 +124,10 @@ def build_parser():
     parser.add_argument("--api-key", default=None, help="HTTP X-API-Key")
     parser.add_argument("--timeout", type=float, default=30, help="HTTP timeout")
     parser.add_argument("--raw", action="store_true", help="Include raw OCR result")
+    parser.add_argument("--annotate", action="store_true", help="Write annotated PNG")
+    parser.add_argument(
+        "--annotate-out", default=None, help="Annotated PNG output path"
+    )
     parser.add_argument("--json", action="store_true", help="Print full JSON")
     return parser
 

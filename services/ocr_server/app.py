@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import inspect
 import json
 import threading
@@ -66,6 +67,13 @@ def _decode_image(png_bytes: bytes) -> np.ndarray:
     if image is None:
         raise HTTPException(status_code=400, detail="invalid PNG image")
     return image
+
+
+def _encode_png(image: np.ndarray) -> bytes:
+    success, buffer = cv2.imencode(".png", image)
+    if not success:
+        raise HTTPException(status_code=500, detail="failed to encode PNG")
+    return buffer.tobytes()
 
 
 def _resolve_device(requested: Optional[str]) -> str:
@@ -583,6 +591,70 @@ def _center(bounds: List[int]) -> Tuple[int, int]:
     return (left + right) // 2, (top + bottom) // 2
 
 
+def _is_ascii(value: str) -> bool:
+    try:
+        value.encode("ascii")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _draw_label(image: np.ndarray, text: str, x: int, y: int, color) -> None:
+    height, width = image.shape[:2]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.6
+    thickness = 2
+    (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, thickness)
+    x = max(0, min(int(x), max(0, width - text_width - 1)))
+    y = max(text_height + baseline, min(int(y), max(text_height + baseline, height - 1)))
+    cv2.putText(
+        image,
+        text,
+        (x, y),
+        font,
+        scale,
+        color,
+        thickness,
+        cv2.LINE_AA,
+    )
+
+
+def _annotate_elements(image: np.ndarray, elements: List[Dict[str, Any]]):
+    annotated = image.copy()
+    colors = [
+        (0, 255, 0),
+        (0, 255, 255),
+        (255, 0, 0),
+        (255, 128, 0),
+        (255, 0, 255),
+    ]
+    legend = []
+    for index, element in enumerate(elements, start=1):
+        bounds = element.get("bounds")
+        if not bounds or len(bounds) != 4:
+            continue
+        x1, y1, x2, y2 = (int(value) for value in bounds)
+        if x2 <= x1 or y2 <= y1:
+            continue
+        color = colors[(index - 1) % len(colors)]
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+        label = str(index)
+        text = element.get("text") or ""
+        if text and _is_ascii(text):
+            label = "{} {}".format(index, text[:12])
+        _draw_label(annotated, label, x1 + 6, y1 + 22, color)
+        legend.append(
+            {
+                "index": index,
+                "text": text,
+                "bounds": bounds,
+                "confidence": element.get("confidence"),
+                "source": element.get("source"),
+            }
+        )
+    return annotated, legend
+
+
 def _get_value(mapping: Dict[str, Any], keys: Iterable[str], default: Any) -> Any:
     for key in keys:
         if key in mapping:
@@ -727,6 +799,7 @@ async def ocr_endpoint(
     offset_x: int = Form(0),
     offset_y: int = Form(0),
     raw: bool = Form(False),
+    annotate: bool = Form(False),
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ) -> Dict[str, Any]:
     _check_api_key(x_api_key)
@@ -747,4 +820,11 @@ async def ocr_endpoint(
         raw_result = _serialize_raw_result(result)
         payload["raw_result"] = raw_result
         payload["structure"] = _summarize_structure(raw_result)
+    if annotate:
+        annotated, legend = _annotate_elements(screen, elements)
+        png_bytes = _encode_png(annotated)
+        payload["annotated_image"] = "data:image/png;base64,{}".format(
+            base64.b64encode(png_bytes).decode("ascii")
+        )
+        payload["annotated_legend"] = legend
     return payload
