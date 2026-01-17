@@ -241,6 +241,120 @@ def _coerce_list(value: Any) -> Any:
     return value
 
 
+_RAW_DROP_KEYS = {
+    "image",
+    "img",
+    "raw_img",
+    "raw_image",
+    "vis_img",
+    "vis_image",
+    "mask",
+    "bitmap",
+    "heatmap",
+    "thumbnail",
+    "preview",
+    "cropped_img",
+    "crop_img",
+    "np_img",
+}
+_RAW_MAX_ARRAY_ITEMS = 10000
+_RAW_MAX_MATRIX_ITEMS = 200000
+
+
+class _RawDrop:
+    pass
+
+
+_RAW_DROP = _RawDrop()
+
+
+def _is_large_matrix(value: Any) -> bool:
+    try:
+        first_len = len(value)
+    except Exception:
+        return False
+    if first_len <= 0:
+        return False
+    if first_len > _RAW_MAX_ARRAY_ITEMS:
+        return True
+    try:
+        first_item = value[0]
+    except Exception:
+        return False
+    if isinstance(first_item, list):
+        try:
+            second_len = len(first_item)
+        except Exception:
+            return False
+        if first_len * second_len > _RAW_MAX_MATRIX_ITEMS:
+            return True
+        if second_len > _RAW_MAX_ARRAY_ITEMS:
+            return True
+    return False
+
+
+def _sanitize_raw(value: Any, key: Optional[str] = None) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if key and key.lower() in _RAW_DROP_KEYS:
+        return _RAW_DROP
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return _RAW_DROP
+    if isinstance(value, np.ndarray):
+        if value.size > _RAW_MAX_ARRAY_ITEMS:
+            return _RAW_DROP
+        return value.tolist()
+    if hasattr(value, "tolist"):
+        try:
+            converted = value.tolist()
+        except Exception:
+            converted = None
+        if converted is not None:
+            return _sanitize_raw(converted, key=key)
+    if isinstance(value, dict):
+        cleaned = {}
+        for item_key, item_value in value.items():
+            cleaned_value = _sanitize_raw(item_value, key=str(item_key))
+            if cleaned_value is _RAW_DROP:
+                continue
+            cleaned[str(item_key)] = cleaned_value
+        return cleaned
+    if isinstance(value, (list, tuple, set, frozenset)):
+        if _is_large_matrix(value):
+            return _RAW_DROP
+        cleaned_list = []
+        for item in value:
+            cleaned_item = _sanitize_raw(item)
+            if cleaned_item is _RAW_DROP:
+                continue
+            cleaned_list.append(cleaned_item)
+        return cleaned_list
+    return str(value)
+
+
+def _serialize_raw_result(result: Any) -> Any:
+    if result is None:
+        return None
+    if isinstance(result, list):
+        serialized = []
+        for item in result:
+            data = _result_to_dict(item)
+            serialized_item = _sanitize_raw(data if data is not None else item)
+            if serialized_item is _RAW_DROP:
+                continue
+            serialized.append(serialized_item)
+        return serialized
+    data = _result_to_dict(result)
+    if data is not None:
+        serialized = _sanitize_raw(data)
+        return None if serialized is _RAW_DROP else serialized
+    if not isinstance(result, list) and isinstance(result, Iterable):
+        serialized = _sanitize_raw(list(result))
+        return None if serialized is _RAW_DROP else serialized
+    serialized = _sanitize_raw(result)
+    return None if serialized is _RAW_DROP else serialized
+
+
 def _extract_text(line: Any) -> Optional[Tuple[Any, str, float]]:
     if isinstance(line, dict):
         box = (
@@ -557,6 +671,7 @@ async def ocr_endpoint(
     device: Optional[str] = Form(None),
     offset_x: int = Form(0),
     offset_y: int = Form(0),
+    raw: bool = Form(False),
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ) -> Dict[str, Any]:
     _check_api_key(x_api_key)
@@ -573,4 +688,6 @@ async def ocr_endpoint(
         "elements": elements,
         "meta": {"width": width, "height": height, "lang": lang, "device": device},
     }
+    if raw:
+        payload["raw_result"] = _serialize_raw_result(result)
     return payload

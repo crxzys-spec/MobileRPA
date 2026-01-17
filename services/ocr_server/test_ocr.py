@@ -57,6 +57,8 @@ def run_local(args):
         result, score_threshold=args.threshold, offset=None
     )
     payload = {"elements": elements}
+    if args.raw:
+        payload["raw_result"] = ocr_app._serialize_raw_result(result)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
@@ -71,6 +73,8 @@ def run_http(args):
     fields = {"lang": args.lang, "threshold": args.threshold}
     if args.device:
         fields["device"] = args.device
+    if args.raw:
+        fields["raw"] = "1"
     filename = Path(args.image).name or "image"
     boundary, body = build_multipart(
         fields, [("image", filename, image_bytes, mime)]
@@ -106,6 +110,7 @@ def build_parser():
     parser.add_argument("--http", default=None, help="HTTP OCR endpoint URL")
     parser.add_argument("--api-key", default=None, help="HTTP X-API-Key")
     parser.add_argument("--timeout", type=float, default=30, help="HTTP timeout")
+    parser.add_argument("--raw", action="store_true", help="Include raw OCR result")
     parser.add_argument("--json", action="store_true", help="Print full JSON")
     return parser
 
