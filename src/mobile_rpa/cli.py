@@ -42,6 +42,14 @@ def adb_text_escape(text):
     return "".join(escaped)
 
 
+def is_ascii(text):
+    try:
+        text.encode("ascii")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
 def parse_bounds(bounds):
     match = re.search(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds or "")
     if not match:
@@ -1488,8 +1496,29 @@ class AdbClient:
         self.shell(["input", "keyevent", str(keycode)])
 
     def input_text(self, text):
-        escaped = adb_text_escape(text)
-        self.shell(["input", "text", escaped])
+        if text is None:
+            return
+        text = str(text)
+        if not text:
+            return
+        if is_ascii(text):
+            escaped = adb_text_escape(text)
+            self.shell(["input", "text", escaped])
+            return
+        try:
+            self.shell(["cmd", "clipboard", "set", text])
+            self.keyevent(279)
+            return
+        except AdbError as exc:
+            try:
+                escaped = adb_text_escape(text)
+                self.shell(["input", "text", escaped])
+                return
+            except AdbError as final_exc:
+                raise AdbError(
+                    "failed to input non-ASCII text; enable clipboard or install an ADB "
+                    "keyboard IME on the device"
+                ) from final_exc
 
     def start_app(self, package, activity=None):
         if activity:
