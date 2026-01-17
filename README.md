@@ -127,9 +127,6 @@ Notes:
 - If `OCR_API_KEY` is set on the server, clients must send `X-API-Key`.
 - Copy `.env.example` to `.env` in repo root to configure OCR defaults.
 
-## Torch (Optional)
-If you need Torch in the same environment, install the cu126 wheels:
-`pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126`
 
 ## CV + LLM Mode (Recommended)
 Use machine vision (templates + OCR, cloud default) to locate elements, then let the LLM
