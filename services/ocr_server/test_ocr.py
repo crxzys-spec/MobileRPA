@@ -51,7 +51,7 @@ def build_multipart(fields, files):
 def run_local(args):
     image_bytes = fetch_image_bytes(args.image)
     screen = ocr_app._decode_image(image_bytes)
-    ocr = ocr_app._ensure_paddleocr(args.lang, args.device)
+    ocr = ocr_app._ensure_structure(args.lang, args.device)
     result = ocr_app._run_ocr_sync(ocr, screen)
     elements = ocr_app._parse_ocr_result(
         result, score_threshold=args.threshold, offset=None

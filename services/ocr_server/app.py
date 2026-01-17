@@ -77,10 +77,10 @@ def _resolve_device(requested: Optional[str]) -> str:
     return "cpu"
 
 
-def _build_paddleocr_kwargs(lang: str, device: str) -> Dict[str, Any]:
-    from paddleocr import PaddleOCR
+def _build_structure_kwargs(lang: str, device: str) -> Dict[str, Any]:
+    from paddleocr import PPStructureV3
 
-    sig = inspect.signature(PaddleOCR.__init__)
+    sig = inspect.signature(PPStructureV3.__init__)
     params = sig.parameters
     accepts_kwargs = any(
         param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()
@@ -91,7 +91,11 @@ def _build_paddleocr_kwargs(lang: str, device: str) -> Dict[str, Any]:
             return kwargs
         return {key: value for key, value in kwargs.items() if key in params}
 
-    kwargs: Dict[str, Any] = {"lang": lang}
+    kwargs: Dict[str, Any] = {}
+    if "lang" in params:
+        kwargs["lang"] = lang
+    elif "ocr_lang" in params:
+        kwargs["ocr_lang"] = lang
     if device == "gpu":
         if "use_gpu" in params:
             kwargs["use_gpu"] = True
@@ -113,19 +117,19 @@ def _build_paddleocr_kwargs(lang: str, device: str) -> Dict[str, Any]:
     return allow(kwargs)
 
 
-def _ensure_paddleocr(lang: str, device: str):
-    from paddleocr import PaddleOCR
+def _ensure_structure(lang: str, device: str):
+    from paddleocr import PPStructureV3
 
-    cache_key = "{}:{}".format(lang, device)
+    cache_key = "structure:{}:{}".format(lang, device)
     if cache_key in _OCR_CACHE:
         return _OCR_CACHE[cache_key]
 
     _patch_paddle_analysis_config()
     try:
-        ocr = PaddleOCR(**_build_paddleocr_kwargs(lang, device))
+        ocr = PPStructureV3(**_build_structure_kwargs(lang, device))
     except Exception as exc:
         if device == "gpu" and settings.allow_cpu_fallback:
-            return _ensure_paddleocr(lang, "cpu")
+            return _ensure_structure(lang, "cpu")
         raise HTTPException(status_code=500, detail=str(exc))
 
     _OCR_CACHE[cache_key] = ocr
@@ -241,6 +245,8 @@ def _extract_text(line: Any) -> Optional[Tuple[Any, str, float]]:
     if isinstance(line, dict):
         box = (
             line.get("box")
+            or line.get("bbox")
+            or line.get("bounds")
             or line.get("points")
             or line.get("poly")
             or line.get("polygon")
@@ -269,12 +275,118 @@ def _extract_text(line: Any) -> Optional[Tuple[Any, str, float]]:
     return None
 
 
+def _flatten_structure_result(result: Any) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    seen = set()
+
+    def add_item(text: Any, box: Any, score: Any) -> None:
+        if text is None:
+            return
+        text_value = str(text).strip()
+        if not text_value:
+            return
+        box_key = None
+        if box is not None:
+            try:
+                coerced = _coerce_list(box)
+                if isinstance(coerced, dict):
+                    box_key = tuple(sorted(coerced.items()))
+                elif isinstance(coerced, list):
+                    box_key = tuple(
+                        tuple(point) if isinstance(point, list) else point
+                        for point in coerced
+                    )
+                else:
+                    box_key = coerced
+            except Exception:
+                box_key = None
+        key = (text_value, box_key)
+        if key in seen:
+            return
+        seen.add(key)
+        items.append(
+            {
+                "text": text_value,
+                "box": box,
+                "score": 1.0 if score is None else score,
+            }
+        )
+
+    def visit(obj: Any, parent_box: Any = None) -> None:
+        if isinstance(obj, dict):
+            box = (
+                obj.get("bbox")
+                or obj.get("box")
+                or obj.get("bounds")
+                or obj.get("polygon")
+                or obj.get("poly")
+                or obj.get("points")
+            )
+            text = obj.get("text") or obj.get("rec_text") or obj.get("label")
+            score = obj.get("score") or obj.get("confidence") or obj.get("rec_score")
+            if text is not None and (box is not None or parent_box is not None):
+                add_item(text, box or parent_box, score)
+            res = obj.get("res")
+            if isinstance(res, list):
+                for item in res:
+                    if isinstance(item, dict):
+                        item_box = (
+                            item.get("bbox")
+                            or item.get("box")
+                            or item.get("bounds")
+                            or item.get("polygon")
+                            or item.get("poly")
+                            or item.get("points")
+                        )
+                        item_text = (
+                            item.get("text")
+                            or item.get("rec_text")
+                            or item.get("label")
+                        )
+                        item_score = (
+                            item.get("score")
+                            or item.get("confidence")
+                            or item.get("rec_score")
+                            or score
+                        )
+                        if item_text is not None:
+                            add_item(item_text, item_box or box or parent_box, item_score)
+                        else:
+                            visit(item, parent_box=box or parent_box)
+                    else:
+                        visit(item, parent_box=box or parent_box)
+            for value in obj.values():
+                if isinstance(value, (dict, list)):
+                    visit(value, parent_box=box or parent_box)
+        elif isinstance(obj, list):
+            for item in obj:
+                visit(item, parent_box=parent_box)
+
+    visit(result)
+    return items
+
+
 def _bounds_from_box(box: Any) -> Optional[List[int]]:
     if box is None:
         return None
     if hasattr(box, "tolist"):
         try:
             box = box.tolist()
+        except Exception:
+            pass
+    if isinstance(box, dict) and all(key in box for key in ("x1", "y1", "x2", "y2")):
+        try:
+            return [
+                int(box["x1"]),
+                int(box["y1"]),
+                int(box["x2"]),
+                int(box["y2"]),
+            ]
+        except Exception:
+            return None
+    if isinstance(box, (list, tuple)) and len(box) == 4:
+        try:
+            return [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
         except Exception:
             pass
     xs: List[float] = []
@@ -316,7 +428,9 @@ def _parse_ocr_result(
     score_threshold: float,
     offset: Optional[Tuple[int, int]] = None,
 ) -> List[Dict[str, Any]]:
-    lines = _normalize_result(result)
+    lines = _flatten_structure_result(result)
+    if not lines:
+        lines = _normalize_result(result)
     elements: List[Dict[str, Any]] = []
     used = set()
     index = 0
@@ -451,7 +565,7 @@ async def ocr_endpoint(
         raise HTTPException(status_code=400, detail="empty image")
     screen = _decode_image(data)
     device = _resolve_device(device)
-    ocr = _ensure_paddleocr(lang, device)
+    ocr = _ensure_structure(lang, device)
     result = await asyncio.to_thread(_run_ocr_sync, ocr, screen)
     elements = _parse_ocr_result(result, score_threshold=threshold, offset=(offset_x, offset_y))
     height, width = screen.shape[:2]

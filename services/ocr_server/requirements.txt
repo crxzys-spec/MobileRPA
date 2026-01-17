@@ -8,5 +8,6 @@ opencv-python-headless
 numpy
 packaging
 safetensors
+paddlex[ocr]
 paddleocr
 paddlepaddle-gpu==3.2.2
