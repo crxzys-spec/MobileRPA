@@ -176,7 +176,7 @@ def _result_to_dict(item: Any) -> Optional[Dict[str, Any]]:
 def _normalize_result(result: Any) -> List[Any]:
     if result is None:
         return []
-    container_keys = ("ocr_result", "result", "data", "res")
+    container_keys = ("ocr_result", "result", "data", "res", "overall_ocr_res")
     if isinstance(result, list):
         converted = []
         converted_any = False
