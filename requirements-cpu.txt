@@ -1,4 +1,6 @@
 aiohttp
 opencv-python
+pydantic-settings
+python-dotenv
 paddleocr
 paddlepaddle

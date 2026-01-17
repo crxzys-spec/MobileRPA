@@ -14,6 +14,8 @@ import urllib.request
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from mobile_rpa.settings import load_settings
+
 
 UI_DUMP_PATH = "/sdcard/uidump.xml"
 WECHAT_PACKAGE = "com.tencent.mm"
@@ -1831,28 +1833,16 @@ def build_parser():
     return parser
 
 
-def load_config(path):
-    if not path:
-        candidates = [
-            Path("config") / "config.json",
-            Path("config.json"),
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                return load_json(candidate)
-        return {}
-    if not Path(path).exists():
-        raise AdbError("config not found: {}".format(path))
-    return load_json(path)
-
-
 def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    config = load_config(args.config)
-    adb_path = args.adb_path or config.get("adb_path") or "adb"
-    device_id = args.device or config.get("device_id") or None
+    try:
+        settings = load_settings(args.config)
+    except FileNotFoundError as exc:
+        raise AdbError(str(exc)) from exc
+    adb_path = args.adb_path or settings.adb_path or "adb"
+    device_id = args.device or settings.device_id or None
 
     adb = AdbClient(adb_path=adb_path, device_id=device_id)
     if args.command != "devices":
@@ -1950,30 +1940,14 @@ def main():
         adb.tap(center_x + offset_x, center_y + offset_y)
         return 0
     if args.command == "cv-detect":
-        ocr_config = config.get("ocr") or {}
-        ocr_provider = args.ocr_provider or ocr_config.get("provider") or "remote"
-        ocr_remote_url = (
-            args.ocr_remote_url
-            or ocr_config.get("remote_url")
-            or os.environ.get("OCR_REMOTE_URL")
-            or "http://127.0.0.1:8001/ocr"
-        )
+        ocr_provider = args.ocr_provider or settings.ocr.provider or "remote"
+        ocr_remote_url = args.ocr_remote_url or settings.ocr.remote_url
         ocr_remote_timeout = args.ocr_remote_timeout
         if ocr_remote_timeout is None:
-            ocr_remote_timeout = (
-                ocr_config.get("timeout")
-                or os.environ.get("OCR_REMOTE_TIMEOUT")
-                or 30
-            )
+            ocr_remote_timeout = settings.ocr.timeout or 30
         ocr_remote_timeout = float(ocr_remote_timeout)
-        ocr_remote_key = (
-            args.ocr_remote_key
-            or ocr_config.get("api_key")
-            or os.environ.get("OCR_API_KEY")
-        )
-        ocr_remote_device = (
-            args.ocr_remote_device or ocr_config.get("device") or None
-        )
+        ocr_remote_key = args.ocr_remote_key or settings.ocr.api_key
+        ocr_remote_device = args.ocr_remote_device or settings.ocr.device or None
 
         ocr_kwargs = {}
         if args.ocr_det_limit_side_len:
@@ -2026,12 +2000,8 @@ def main():
             print("annotated_image={}".format(args.annotate), file=sys.stderr)
         return 0
     if args.command == "llm-decide":
-        api_key = (
-            args.api_key
-            or config.get("openai_api_key")
-            or os.environ.get("OPENAI_API_KEY")
-        )
-        model = args.model or config.get("openai_model") or "gpt-4o-mini"
+        api_key = args.api_key or settings.openai_api_key
+        model = args.model or settings.openai_model or "gpt-4o-mini"
         elements_payload = load_json(args.elements)
         elements = elements_payload.get("elements") or []
         screen = elements_payload.get("screen") or {}
@@ -2104,12 +2074,8 @@ def main():
                 print("alignment=mismatch")
         return 0
     if args.command == "vision":
-        api_key = (
-            args.api_key
-            or config.get("openai_api_key")
-            or os.environ.get("OPENAI_API_KEY")
-        )
-        model = args.model or config.get("openai_model") or "gpt-4o-mini"
+        api_key = args.api_key or settings.openai_api_key
+        model = args.model or settings.openai_model or "gpt-4o-mini"
         png_bytes, width, height = get_png_bytes(adb, args.image)
         region = resolve_region(args.region, width, height)
         model_png_bytes = png_bytes
@@ -2166,12 +2132,8 @@ def main():
             )
         return 0
     if args.command == "vision-label":
-        api_key = (
-            args.api_key
-            or config.get("openai_api_key")
-            or os.environ.get("OPENAI_API_KEY")
-        )
-        model = args.model or config.get("openai_model") or "gpt-4o-mini"
+        api_key = args.api_key or settings.openai_api_key
+        model = args.model or settings.openai_model or "gpt-4o-mini"
         png_bytes, width, height = get_png_bytes(adb, args.image)
         region = resolve_region(args.region, width, height)
         model_png_bytes = png_bytes

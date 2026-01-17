@@ -26,6 +26,7 @@ class Settings(BaseSettings):
         env_prefix="OCR_",
         env_file=str(ROOT_DIR / ".env"),
         env_file_encoding="utf-8",
+        extra="ignore",
     )
 
 

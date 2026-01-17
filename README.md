@@ -24,6 +24,10 @@ via template matching.
 4. For image recognition flows:
    `python bot.py run assets/flows/send_message_image.json --device <DEVICE_ID>`
 
+## Settings
+Client settings load from `config/config.json` and `.env` (env wins). See
+`.env.example` for both client and OCR service variables.
+
 ## Project Layout
 - `bot.py` CLI entrypoint
 - `src/mobile_rpa/` core implementation
