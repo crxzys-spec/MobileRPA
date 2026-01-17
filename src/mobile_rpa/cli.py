@@ -149,6 +149,10 @@ def ensure_paddleocr(
         elif "mode" in params:
             base_kwargs["mode"] = "ocr"
 
+        if "use_doc_orientation_classify" in params:
+            base_kwargs["use_doc_orientation_classify"] = False
+        if "use_doc_unwarping" in params:
+            base_kwargs["use_doc_unwarping"] = False
         if "use_textline_orientation" in params:
             base_kwargs["use_textline_orientation"] = False
         elif "use_angle_cls" in params:
@@ -749,12 +753,69 @@ def detect_templates(screen, template_dir, threshold=0.85, offset=None):
     return elements
 
 
+def _result_to_dict(item):
+    if isinstance(item, dict):
+        return item
+    for attr in ("to_dict", "dict", "as_dict"):
+        func = getattr(item, attr, None)
+        if callable(func):
+            try:
+                data = func()
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                return data
+    for attr in ("json", "to_json"):
+        func = getattr(item, attr, None)
+        if callable(func):
+            try:
+                raw = func()
+            except Exception:
+                continue
+            if isinstance(raw, dict):
+                return raw
+            if isinstance(raw, str):
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(data, dict):
+                    return data
+    data = getattr(item, "__dict__", None)
+    if isinstance(data, dict) and data:
+        return data
+    return None
+
+
 def parse_ocr_result(result, score_threshold=0.5, offset=None):
     lines = result
-    if isinstance(result, dict):
+    if isinstance(lines, list):
+        converted = []
+        converted_any = False
+        for item in lines:
+            data = _result_to_dict(item)
+            if data is not None:
+                converted.append(data)
+                converted_any = True
+            else:
+                converted.append(item)
+        if converted_any:
+            lines = converted
+        if lines and all(isinstance(item, dict) for item in lines):
+            flattened = []
+            for item in lines:
+                for key in ("ocr_result", "result", "data"):
+                    value = item.get(key)
+                    if isinstance(value, list):
+                        flattened.extend(value)
+                        break
+                else:
+                    flattened.append(item)
+            lines = flattened
+    if isinstance(lines, dict):
         for key in ("ocr_result", "result", "data"):
-            if key in result:
-                lines = result[key]
+            if key in lines:
+                lines = lines[key]
                 break
     if not isinstance(lines, list) and hasattr(lines, "__iter__"):
         lines = list(lines)
@@ -839,6 +900,12 @@ def parse_ocr_result(result, score_threshold=0.5, offset=None):
 
 def run_ocr(ocr, screen):
     if hasattr(ocr, "predict"):
+        try:
+            sig = inspect.signature(ocr.predict)
+        except (TypeError, ValueError):
+            return ocr.predict(screen)
+        if "input" in sig.parameters:
+            return ocr.predict(input=screen)
         return ocr.predict(screen)
     return ocr.ocr(screen)
 

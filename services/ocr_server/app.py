@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import json
 import threading
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -107,6 +108,10 @@ def _build_paddleocr_kwargs(lang: str, device: str) -> Dict[str, Any]:
     elif "mode" in params:
         kwargs["mode"] = "ocr"
 
+    if "use_doc_orientation_classify" in params:
+        kwargs["use_doc_orientation_classify"] = False
+    if "use_doc_unwarping" in params:
+        kwargs["use_doc_unwarping"] = False
     if "use_textline_orientation" in params:
         kwargs["use_textline_orientation"] = False
     elif "use_angle_cls" in params:
@@ -134,9 +139,66 @@ def _ensure_paddleocr(lang: str, device: str):
     return ocr
 
 
+def _result_to_dict(item: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(item, dict):
+        return item
+    for attr in ("to_dict", "dict", "as_dict"):
+        func = getattr(item, attr, None)
+        if callable(func):
+            try:
+                data = func()
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                return data
+    for attr in ("json", "to_json"):
+        func = getattr(item, attr, None)
+        if callable(func):
+            try:
+                raw = func()
+            except Exception:
+                continue
+            if isinstance(raw, dict):
+                return raw
+            if isinstance(raw, str):
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(data, dict):
+                    return data
+    data = getattr(item, "__dict__", None)
+    if isinstance(data, dict) and data:
+        return data
+    return None
+
+
 def _normalize_result(result: Any) -> List[Any]:
     if result is None:
         return []
+    if isinstance(result, list):
+        converted = []
+        converted_any = False
+        for item in result:
+            data = _result_to_dict(item)
+            if data is not None:
+                converted.append(data)
+                converted_any = True
+            else:
+                converted.append(item)
+        if converted_any:
+            result = converted
+        if result and all(isinstance(item, dict) for item in result):
+            flattened = []
+            for item in result:
+                for key in ("ocr_result", "result", "data"):
+                    value = item.get(key)
+                    if isinstance(value, list):
+                        flattened.extend(value)
+                        break
+                else:
+                    flattened.append(item)
+            result = flattened
     if isinstance(result, dict):
         for key in ("ocr_result", "result", "data"):
             if key in result:
@@ -248,6 +310,12 @@ def _parse_ocr_result(
 def _run_ocr_sync(ocr: Any, image: np.ndarray) -> Any:
     with _OCR_LOCK:
         if hasattr(ocr, "predict"):
+            try:
+                sig = inspect.signature(ocr.predict)
+            except (TypeError, ValueError):
+                return ocr.predict(image)
+            if "input" in sig.parameters:
+                return ocr.predict(input=image)
             return ocr.predict(image)
         return ocr.ocr(image)
 
