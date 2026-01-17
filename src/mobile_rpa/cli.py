@@ -2115,6 +2115,123 @@ def build_parser():
         "--annotate", default=None, help="Write annotated PNG with element boxes"
     )
 
+    cv_decide_parser = subparsers.add_parser(
+        "cv-decide", help="Detect elements then use LLM to choose actions"
+    )
+    cv_decide_parser.add_argument("--goal", required=True, help="Goal for the model")
+    cv_decide_parser.add_argument(
+        "--image", default=None, help="Optional PNG path (defaults to screenshot)"
+    )
+    cv_decide_parser.add_argument(
+        "--templates",
+        default="assets/templates",
+        help="Template directory (default: assets/templates)",
+    )
+    cv_decide_parser.add_argument(
+        "--template-threshold", type=float, default=0.85, help="Template threshold"
+    )
+    cv_decide_parser.add_argument(
+        "--no-ocr", action="store_true", help="Disable OCR detection"
+    )
+    cv_decide_parser.add_argument(
+        "--ocr-provider",
+        choices=["remote", "local"],
+        default=None,
+        help="OCR provider (default: config or remote)",
+    )
+    cv_decide_parser.add_argument(
+        "--ocr-remote-url",
+        default=None,
+        help="Remote OCR endpoint (default: config or OCR_REMOTE_URL)",
+    )
+    cv_decide_parser.add_argument(
+        "--ocr-remote-timeout",
+        type=float,
+        default=None,
+        help="Remote OCR timeout seconds (default: config or 30)",
+    )
+    cv_decide_parser.add_argument(
+        "--ocr-remote-key",
+        default=None,
+        help="Remote OCR API key (X-API-Key header)",
+    )
+    cv_decide_parser.add_argument(
+        "--ocr-remote-device",
+        choices=["auto", "gpu", "cpu"],
+        default=None,
+        help="Remote OCR device override",
+    )
+    cv_decide_parser.add_argument(
+        "--ocr-lang", default="ch", help="OCR language (default: ch)"
+    )
+    cv_decide_parser.add_argument(
+        "--ocr-gpu", action="store_true", help="Use GPU for local OCR"
+    )
+    cv_decide_parser.add_argument(
+        "--ocr-no-fallback",
+        action="store_true",
+        help="Fail if local GPU OCR is unavailable",
+    )
+    cv_decide_parser.add_argument(
+        "--ocr-threshold", type=float, default=0.5, help="OCR confidence threshold"
+    )
+    cv_decide_parser.add_argument(
+        "--ocr-det-limit-side-len",
+        type=int,
+        default=None,
+        help="OCR det_limit_side_len override",
+    )
+    cv_decide_parser.add_argument(
+        "--ocr-det-db-thresh",
+        type=float,
+        default=None,
+        help="OCR det_db_thresh override",
+    )
+    cv_decide_parser.add_argument(
+        "--ocr-det-db-box-thresh",
+        type=float,
+        default=None,
+        help="OCR det_db_box_thresh override",
+    )
+    cv_decide_parser.add_argument(
+        "--ocr-det-unclip-ratio",
+        type=float,
+        default=None,
+        help="OCR det_db_unclip_ratio override",
+    )
+    cv_decide_parser.add_argument(
+        "--region",
+        default=None,
+        help="Crop region for detection (x1,y1,x2,y2; absolute or 0..1)",
+    )
+    cv_decide_parser.add_argument(
+        "--elements-output", default=None, help="Write elements JSON to file"
+    )
+    cv_decide_parser.add_argument(
+        "--max-elements", type=int, default=30, help="Max elements to include"
+    )
+    cv_decide_parser.add_argument(
+        "--output", default=None, help="Write actions JSON to file"
+    )
+    cv_decide_parser.add_argument(
+        "--execute", action="store_true", help="Execute suggested actions"
+    )
+    cv_decide_parser.add_argument(
+        "--model", default=None, help="OpenAI model (default: gpt-4o-mini)"
+    )
+    cv_decide_parser.add_argument(
+        "--temperature", type=float, default=0.2, help="Model temperature"
+    )
+    cv_decide_parser.add_argument(
+        "--max-actions", type=int, default=5, help="Maximum actions to request"
+    )
+    cv_decide_parser.add_argument(
+        "--annotate", default=None, help="Write annotated PNG with action markers"
+    )
+    cv_decide_parser.add_argument(
+        "--api-key", default=None, help="OpenAI API key (or set OPENAI_API_KEY)"
+    )
+
     decide_parser = subparsers.add_parser(
         "llm-decide", help="Choose actions from detected elements"
     )
@@ -2450,6 +2567,116 @@ def main():
             annotate_elements(annotated, elements, width, height)
             save_image(args.annotate, annotated)
             print("annotated_image={}".format(args.annotate), file=sys.stderr)
+        return 0
+    if args.command == "cv-decide":
+        api_key = args.api_key or settings.openai_api_key
+        model = args.model or settings.openai_model or "gpt-4o-mini"
+
+        ocr_provider = args.ocr_provider or settings.ocr.provider or "remote"
+        ocr_remote_url = args.ocr_remote_url or settings.ocr.remote_url
+        ocr_remote_timeout = args.ocr_remote_timeout
+        if ocr_remote_timeout is None:
+            ocr_remote_timeout = settings.ocr.timeout or 30
+        ocr_remote_timeout = float(ocr_remote_timeout)
+        ocr_remote_key = args.ocr_remote_key or settings.ocr.api_key
+        ocr_remote_device = args.ocr_remote_device or settings.ocr.device or None
+
+        ocr_kwargs = {}
+        if args.ocr_det_limit_side_len:
+            ocr_kwargs["det_limit_side_len"] = args.ocr_det_limit_side_len
+        if args.ocr_det_db_thresh is not None:
+            ocr_kwargs["det_db_thresh"] = args.ocr_det_db_thresh
+        if args.ocr_det_db_box_thresh is not None:
+            ocr_kwargs["det_db_box_thresh"] = args.ocr_det_db_box_thresh
+        if args.ocr_det_unclip_ratio is not None:
+            ocr_kwargs["det_db_unclip_ratio"] = args.ocr_det_unclip_ratio
+        if not ocr_kwargs:
+            ocr_kwargs = None
+
+        elements, width, height, png_bytes, crop_region = detect_elements(
+            adb,
+            image_path=args.image,
+            template_dir=args.templates,
+            template_threshold=args.template_threshold,
+            use_ocr=not args.no_ocr,
+            ocr_lang=args.ocr_lang,
+            ocr_threshold=args.ocr_threshold,
+            ocr_provider=ocr_provider,
+            ocr_remote_url=ocr_remote_url,
+            ocr_remote_timeout=ocr_remote_timeout,
+            ocr_remote_api_key=ocr_remote_key,
+            ocr_remote_device=ocr_remote_device,
+            ocr_use_gpu=args.ocr_gpu,
+            ocr_allow_cpu_fallback=not args.ocr_no_fallback,
+            ocr_kwargs=ocr_kwargs,
+            region=args.region,
+        )
+
+        if elements:
+            elements = sorted(
+                elements,
+                key=lambda item: float(item.get("confidence", 0) or 0),
+                reverse=True,
+            )
+        if args.max_elements and len(elements) > args.max_elements:
+            elements = elements[: args.max_elements]
+
+        if args.elements_output:
+            elements_payload = {
+                "elements": elements,
+                "screen": {"width": width, "height": height},
+            }
+            if crop_region:
+                elements_payload["region"] = {
+                    "x1": crop_region[0],
+                    "y1": crop_region[1],
+                    "x2": crop_region[2],
+                    "y2": crop_region[3],
+                }
+            Path(args.elements_output).write_text(
+                json.dumps(elements_payload, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+        prompt = build_decision_prompt(args.goal, elements, args.max_actions)
+        response_text = call_openai_text(
+            api_key,
+            model,
+            prompt,
+            temperature=args.temperature,
+        )
+        actions = parse_actions_json(response_text)
+        if len(actions) > args.max_actions:
+            actions = actions[: args.max_actions]
+
+        output_data = {"actions": actions, "screen": {"width": width, "height": height}}
+        if crop_region:
+            output_data["region"] = {
+                "x1": crop_region[0],
+                "y1": crop_region[1],
+                "x2": crop_region[2],
+                "y2": crop_region[3],
+            }
+        output_text = json.dumps(output_data, indent=2, ensure_ascii=False)
+        if args.output:
+            Path(args.output).write_text(output_text, encoding="utf-8")
+        print(output_text)
+        if args.annotate:
+            annotated = decode_png(png_bytes)
+            annotate_actions(annotated, actions, width, height)
+            save_image(args.annotate, annotated)
+            print("annotated_image={}".format(args.annotate), file=sys.stderr)
+        if args.execute:
+            if not adb.device_id:
+                adb.device_id = resolve_device_id(adb, adb.device_id)
+            execute_actions(
+                adb,
+                actions,
+                width,
+                height,
+                log=lambda message: print(message, file=sys.stderr),
+                elements=elements,
+            )
         return 0
     if args.command == "llm-decide":
         api_key = args.api_key or settings.openai_api_key

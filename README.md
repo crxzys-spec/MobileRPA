@@ -59,6 +59,8 @@ for both client and OCR service variables.
   `python bot.py tap-image --image assets/templates/search.png --device <DEVICE_ID>`
 - Detect elements via templates + OCR:
   `python bot.py cv-detect --output elements.json --annotate elements.png`
+- Detect elements and let the LLM decide actions:
+  `python bot.py cv-decide --goal "打开搜索" --execute --elements-output elements.json`
 - Use local OCR instead of cloud:
   `python bot.py cv-detect --ocr-provider local --output elements.json --annotate elements.png`
 - Use GPU for local OCR:
@@ -146,6 +148,9 @@ choose actions from a structured element list.
    `python bot.py cv-detect --output elements.json --annotate elements.png`
 3. Let the LLM decide actions:
    `python bot.py llm-decide --goal "给张三发消息" --elements elements.json --execute`
+
+Or run both steps in one command:
+`python bot.py cv-decide --goal "给张三发消息" --execute --elements-output elements.json`
 
 Tips:
 - Put icon/button templates in `assets/templates/`.
