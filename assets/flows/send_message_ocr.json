@@ -1,0 +1,40 @@
+{
+  "name": "send_message_ocr",
+  "meta": {
+    "note": "Update the text labels to match your WeChat UI and keep the contact visible."
+  },
+  "steps": [
+    {
+      "action": "start_app",
+      "package": "com.tencent.mm",
+      "activity": "com.tencent.mm.ui.LauncherUI"
+    },
+    {
+      "action": "wait",
+      "seconds": 2
+    },
+    {
+      "action": "tap_ocr_text",
+      "text": "Alice",
+      "exact": true,
+      "timeout": 5,
+      "threshold": 0.3
+    },
+    {
+      "action": "wait",
+      "seconds": 1
+    },
+    {
+      "action": "text",
+      "value": "Hello from OCR"
+    },
+    {
+      "action": "tap_ocr_text",
+      "text": "Send",
+      "exact": true,
+      "timeout": 5,
+      "threshold": 0.3,
+      "region": "0,0.7,1,1"
+    }
+  ]
+}

@@ -1602,6 +1602,125 @@ def tap_node(adb, node):
     adb.tap(x, y)
 
 
+def build_ocr_runtime(settings):
+    provider = (settings.ocr.provider or "remote").strip().lower()
+    device = (settings.ocr.device or "auto").strip().lower()
+    remote_timeout = settings.ocr.timeout or 30
+    return {
+        "provider": provider,
+        "remote_url": settings.ocr.remote_url,
+        "remote_timeout": float(remote_timeout),
+        "remote_key": settings.ocr.api_key,
+        "remote_device": device if provider == "remote" else None,
+        "use_gpu": provider == "local" and device in ("gpu", "cuda"),
+        "allow_cpu_fallback": True,
+    }
+
+
+def text_matches(candidate, text, exact=True):
+    if candidate is None:
+        return False
+    candidate = str(candidate).strip()
+    text = str(text).strip()
+    if not text:
+        return False
+    if exact:
+        return candidate == text
+    return text in candidate
+
+
+def sort_ocr_matches(matches):
+    def key(item):
+        confidence = float(item.get("confidence") or 0)
+        bounds = item.get("bounds") or [0, 0, 0, 0]
+        return (-confidence, bounds[1], bounds[0])
+
+    return sorted(matches, key=key)
+
+
+def select_ocr_match(matches, index):
+    if not matches:
+        return None
+    if index is None:
+        index = 0
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        return None
+    if index < 0:
+        index = len(matches) + index
+    if index < 0 or index >= len(matches):
+        return None
+    return matches[index]
+
+
+def find_ocr_matches(
+    adb,
+    text,
+    exact,
+    ocr_config,
+    lang="ch",
+    threshold=0.5,
+    region=None,
+):
+    if not ocr_config:
+        raise AdbError("OCR is not configured")
+    elements, _, _, _, _ = detect_elements(
+        adb,
+        image_path=None,
+        template_dir=None,
+        template_threshold=0.85,
+        use_ocr=True,
+        ocr_lang=lang,
+        ocr_threshold=threshold,
+        ocr_provider=ocr_config["provider"],
+        ocr_remote_url=ocr_config["remote_url"],
+        ocr_remote_timeout=ocr_config["remote_timeout"],
+        ocr_remote_api_key=ocr_config["remote_key"],
+        ocr_remote_device=ocr_config["remote_device"],
+        ocr_use_gpu=ocr_config["use_gpu"],
+        ocr_allow_cpu_fallback=ocr_config["allow_cpu_fallback"],
+        ocr_kwargs=None,
+        region=region,
+    )
+    matches = [
+        element
+        for element in elements
+        if text_matches(element.get("text"), text, exact=exact)
+    ]
+    return sort_ocr_matches(matches)
+
+
+def wait_for_ocr_text(
+    adb,
+    text,
+    exact,
+    ocr_config,
+    lang="ch",
+    threshold=0.5,
+    region=None,
+    timeout=10,
+    interval=0.7,
+    index=0,
+):
+    start = time.time()
+    while time.time() - start < timeout:
+        matches = find_ocr_matches(
+            adb,
+            text,
+            exact,
+            ocr_config,
+            lang=lang,
+            threshold=threshold,
+            region=region,
+        )
+        match = select_ocr_match(matches, index)
+        if match:
+            return match
+        time.sleep(interval)
+    return None
+
+
 def load_json(path):
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -1618,7 +1737,7 @@ def resolve_device_id(adb, device_id):
     return devices[0]
 
 
-def run_flow(adb, flow_path):
+def run_flow(adb, flow_path, ocr_config=None):
     flow = load_json(flow_path)
     steps = flow.get("steps", [])
     if not steps:
@@ -1666,6 +1785,48 @@ def run_flow(adb, flow_path):
                 raise AdbError("tap_text not found: {}".format(step["text"]))
             tap_node(adb, node)
             continue
+        if action == "tap_ocr_text":
+            exact = bool(step.get("exact", True))
+            if step.get("contains"):
+                exact = False
+            timeout = float(step.get("timeout", 0))
+            interval = float(step.get("interval", 0.7))
+            threshold = float(step.get("threshold", 0.5))
+            lang = step.get("lang", "ch")
+            region = step.get("region")
+            index = step.get("index", 0)
+            if timeout > 0:
+                match = wait_for_ocr_text(
+                    adb,
+                    step["text"],
+                    exact=exact,
+                    ocr_config=ocr_config,
+                    lang=lang,
+                    threshold=threshold,
+                    region=region,
+                    timeout=timeout,
+                    interval=interval,
+                    index=index,
+                )
+            else:
+                matches = find_ocr_matches(
+                    adb,
+                    step["text"],
+                    exact=exact,
+                    ocr_config=ocr_config,
+                    lang=lang,
+                    threshold=threshold,
+                    region=region,
+                )
+                match = select_ocr_match(matches, index)
+            if not match:
+                raise AdbError("tap_ocr_text not found: {}".format(step["text"]))
+            bounds = match.get("bounds")
+            if not bounds:
+                raise AdbError("tap_ocr_text missing bounds: {}".format(step["text"]))
+            x, y = bounds_center(bounds)
+            adb.tap(x, y)
+            continue
         if action == "tap_image":
             image_path = step["image"]
             threshold = float(step.get("threshold", 0.85))
@@ -1700,6 +1861,31 @@ def run_flow(adb, flow_path):
             node = wait_for_text(adb, step["text"], exact=exact, timeout=timeout)
             if not node:
                 raise AdbError("wait_text timed out: {}".format(step["text"]))
+            continue
+        if action == "wait_ocr_text":
+            exact = bool(step.get("exact", True))
+            if step.get("contains"):
+                exact = False
+            timeout = float(step.get("timeout", 10))
+            interval = float(step.get("interval", 0.7))
+            threshold = float(step.get("threshold", 0.5))
+            lang = step.get("lang", "ch")
+            region = step.get("region")
+            index = step.get("index", 0)
+            match = wait_for_ocr_text(
+                adb,
+                step["text"],
+                exact=exact,
+                ocr_config=ocr_config,
+                lang=lang,
+                threshold=threshold,
+                region=region,
+                timeout=timeout,
+                interval=interval,
+                index=index,
+            )
+            if not match:
+                raise AdbError("wait_ocr_text timed out: {}".format(step["text"]))
             continue
         if action == "wait_image":
             image_path = step["image"]
@@ -1752,6 +1938,52 @@ def build_parser():
     tap_text_parser.add_argument("--text", required=True, help="Text to match")
     tap_text_parser.add_argument("--contains", action="store_true", help="Substring match")
     tap_text_parser.add_argument("--timeout", type=float, default=0, help="Wait timeout")
+
+    list_ocr_text = subparsers.add_parser(
+        "list-ocr-text", help="List OCR elements matching text"
+    )
+    list_ocr_text.add_argument("--text", required=True, help="Text to match")
+    list_ocr_text.add_argument("--contains", action="store_true", help="Substring match")
+    list_ocr_text.add_argument(
+        "--threshold", type=float, default=0.5, help="OCR confidence threshold"
+    )
+    list_ocr_text.add_argument("--lang", default="ch", help="OCR language (default: ch)")
+    list_ocr_text.add_argument(
+        "--region",
+        default=None,
+        help="Crop region for OCR (x1,y1,x2,y2; absolute or 0..1)",
+    )
+    list_ocr_text.add_argument(
+        "--index", type=int, default=None, help="Optional match index"
+    )
+
+    tap_ocr_text_parser = subparsers.add_parser(
+        "tap-ocr-text", help="Tap an OCR element by text"
+    )
+    tap_ocr_text_parser.add_argument("--text", required=True, help="Text to match")
+    tap_ocr_text_parser.add_argument(
+        "--contains", action="store_true", help="Substring match"
+    )
+    tap_ocr_text_parser.add_argument(
+        "--threshold", type=float, default=0.5, help="OCR confidence threshold"
+    )
+    tap_ocr_text_parser.add_argument(
+        "--lang", default="ch", help="OCR language (default: ch)"
+    )
+    tap_ocr_text_parser.add_argument(
+        "--region",
+        default=None,
+        help="Crop region for OCR (x1,y1,x2,y2; absolute or 0..1)",
+    )
+    tap_ocr_text_parser.add_argument(
+        "--timeout", type=float, default=0, help="Wait timeout"
+    )
+    tap_ocr_text_parser.add_argument(
+        "--interval", type=float, default=0.7, help="Polling interval"
+    )
+    tap_ocr_text_parser.add_argument(
+        "--index", type=int, default=0, help="Match index (default: 0)"
+    )
 
     run_parser = subparsers.add_parser("run", help="Run a flow JSON file")
     run_parser.add_argument("flow", help="Path to flow json")
@@ -2049,6 +2281,66 @@ def main():
             raise AdbError("text not found: {}".format(args.text))
         tap_node(adb, node)
         return 0
+    if args.command == "list-ocr-text":
+        ocr_config = build_ocr_runtime(settings)
+        exact = not args.contains
+        matches = find_ocr_matches(
+            adb,
+            args.text,
+            exact=exact,
+            ocr_config=ocr_config,
+            lang=args.lang,
+            threshold=args.threshold,
+            region=args.region,
+        )
+        if args.index is not None:
+            match = select_ocr_match(matches, args.index)
+            matches = [match] if match else []
+        for match in matches:
+            bounds = match.get("bounds")
+            print(
+                "{} | {} | {:.3f}".format(
+                    match.get("text"),
+                    bounds,
+                    float(match.get("confidence") or 0),
+                )
+            )
+        return 0
+    if args.command == "tap-ocr-text":
+        ocr_config = build_ocr_runtime(settings)
+        exact = not args.contains
+        if args.timeout > 0:
+            match = wait_for_ocr_text(
+                adb,
+                args.text,
+                exact=exact,
+                ocr_config=ocr_config,
+                lang=args.lang,
+                threshold=args.threshold,
+                region=args.region,
+                timeout=args.timeout,
+                interval=args.interval,
+                index=args.index,
+            )
+        else:
+            matches = find_ocr_matches(
+                adb,
+                args.text,
+                exact=exact,
+                ocr_config=ocr_config,
+                lang=args.lang,
+                threshold=args.threshold,
+                region=args.region,
+            )
+            match = select_ocr_match(matches, args.index)
+        if not match:
+            raise AdbError("ocr text not found: {}".format(args.text))
+        bounds = match.get("bounds")
+        if not bounds:
+            raise AdbError("ocr match missing bounds: {}".format(args.text))
+        x, y = bounds_center(bounds)
+        adb.tap(x, y)
+        return 0
     if args.command == "find-image":
         region = normalize_region(args.region)
         match = find_image(
@@ -2344,7 +2636,8 @@ def main():
             print("annotated_image={}".format(args.annotate), file=sys.stderr)
         return 0
     if args.command == "run":
-        run_flow(adb, args.flow)
+        ocr_config = build_ocr_runtime(settings)
+        run_flow(adb, args.flow, ocr_config=ocr_config)
         return 0
     if args.command == "screenshot":
         adb.screenshot(args.output)

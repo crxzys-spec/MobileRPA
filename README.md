@@ -23,6 +23,8 @@ via template matching.
    `python bot.py run assets/flows/send_message.json --device <DEVICE_ID>`
 4. For image recognition flows:
    `python bot.py run assets/flows/send_message_image.json --device <DEVICE_ID>`
+5. For OCR-only flows:
+   `python bot.py run assets/flows/send_message_ocr.json --device <DEVICE_ID>`
 
 ## Settings
 Client settings load from `.env` (and environment variables). See `.env.example`
@@ -45,6 +47,10 @@ for both client and OCR service variables.
   `python bot.py list-text --text Search --contains --device <DEVICE_ID>`
 - Tap a node by text:
   `python bot.py tap-text --text Search --contains --device <DEVICE_ID>`
+- List OCR text matches:
+  `python bot.py list-ocr-text --text Search --contains --threshold 0.3`
+- Tap OCR text match:
+  `python bot.py tap-ocr-text --text Search --contains --threshold 0.3`
 - Take a screenshot:
   `python bot.py screenshot --output screen.png --device <DEVICE_ID>`
 - Find a template image:
@@ -167,6 +173,8 @@ Flow files are JSON with a `steps` array. Supported actions:
 - `keyevent` { keycode }
 - `tap_text` { text, exact?, timeout? }
 - `wait_text` { text, exact?, timeout? }
+- `tap_ocr_text` { text, exact?, contains?, threshold?, timeout?, interval?, region?, index?, lang? }
+- `wait_ocr_text` { text, exact?, contains?, threshold?, timeout?, interval?, region?, index?, lang? }
 - `tap_image` { image, threshold?, timeout?, interval?, region?, offset? }
 - `wait_image` { image, threshold?, timeout?, interval?, region? }
 - `screenshot` { path }
