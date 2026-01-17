@@ -122,6 +122,7 @@ Notes:
 - Set `OCR_DEVICE=gpu` on the server to force GPU.
 - If `OCR_API_KEY` is set on the server, clients must send `X-API-Key`.
 - Clients can set `ocr.api_key` in `config/config.json` or `OCR_API_KEY`.
+- Copy `.env.example` to `.env` in repo root to configure OCR defaults.
 
 ## CV + LLM Mode (Recommended)
 Use machine vision (templates + OCR, cloud default) to locate elements, then let the LLM

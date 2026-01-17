@@ -1,18 +1,35 @@
 import asyncio
 import inspect
-import os
 import threading
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 app = FastAPI(title="MobileRPA OCR")
 
 _OCR_CACHE: Dict[str, Any] = {}
 _OCR_LOCK = threading.Lock()
+ROOT_DIR = Path(__file__).resolve().parents[2]
+
+
+class Settings(BaseSettings):
+    device: str = "gpu"
+    allow_cpu_fallback: bool = True
+    api_key: Optional[str] = None
+
+    model_config = SettingsConfigDict(
+        env_prefix="OCR_",
+        env_file=str(ROOT_DIR / ".env"),
+        env_file_encoding="utf-8",
+    )
+
+
+settings = Settings()
 
 
 def _decode_image(png_bytes: bytes) -> np.ndarray:
@@ -24,7 +41,7 @@ def _decode_image(png_bytes: bytes) -> np.ndarray:
 
 
 def _resolve_device(requested: Optional[str]) -> str:
-    value = (requested or os.getenv("OCR_DEVICE", "gpu")).strip().lower()
+    value = (requested or settings.device or "gpu").strip().lower()
     if value in ("gpu", "cuda"):
         return "gpu"
     if value in ("auto", ""):
@@ -81,11 +98,7 @@ def _ensure_paddleocr(lang: str, device: str):
     try:
         ocr = PaddleOCR(**_build_paddleocr_kwargs(lang, device))
     except Exception as exc:
-        allow_fallback = os.getenv("OCR_ALLOW_CPU_FALLBACK", "1").lower() not in (
-            "0",
-            "false",
-        )
-        if device == "gpu" and allow_fallback:
+        if device == "gpu" and settings.allow_cpu_fallback:
             return _ensure_paddleocr(lang, "cpu")
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -212,7 +225,7 @@ def _run_ocr_sync(ocr: Any, image: np.ndarray) -> Any:
 
 
 def _check_api_key(x_api_key: Optional[str]) -> None:
-    required = os.getenv("OCR_API_KEY")
+    required = settings.api_key
     if not required:
         return
     if not x_api_key or x_api_key != required:
