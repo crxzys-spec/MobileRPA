@@ -241,7 +241,7 @@ def _coerce_list(value: Any) -> Any:
     return value
 
 
-_RAW_DROP_KEYS = {"input_img", "rot_img", "output_img"}
+_RAW_DROP_KEYS = {"input_img", "rot_img", "output_img", "vis_fonts"}
 class _RawDrop:
     pass
 
