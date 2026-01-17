@@ -276,6 +276,15 @@ def _center(bounds: List[int]) -> Tuple[int, int]:
     return (left + right) // 2, (top + bottom) // 2
 
 
+def _get_value(mapping: Dict[str, Any], keys: Iterable[str], default: Any) -> Any:
+    for key in keys:
+        if key in mapping:
+            value = mapping.get(key)
+            if value is not None:
+                return value
+    return default
+
+
 def _parse_ocr_result(
     result: Any,
     score_threshold: float,
@@ -289,10 +298,10 @@ def _parse_ocr_result(
         if isinstance(line, dict) and (
             "rec_texts" in line or "rec_polys" in line or "rec_boxes" in line
         ):
-            texts = _coerce_list(line.get("rec_texts") or [])
-            scores = _coerce_list(line.get("rec_scores") or [])
-            polys = _coerce_list(line.get("rec_polys") or line.get("dt_polys") or [])
-            boxes = _coerce_list(line.get("rec_boxes") or [])
+            texts = _coerce_list(_get_value(line, ("rec_texts",), [])) or []
+            scores = _coerce_list(_get_value(line, ("rec_scores",), [])) or []
+            polys = _coerce_list(_get_value(line, ("rec_polys", "dt_polys"), [])) or []
+            boxes = _coerce_list(_get_value(line, ("rec_boxes",), [])) or []
             for i, text in enumerate(texts):
                 score = scores[i] if i < len(scores) else 1.0
                 if text is None:
