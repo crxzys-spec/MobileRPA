@@ -25,18 +25,18 @@ via template matching.
    `python bot.py run assets/flows/send_message_image.json --device <DEVICE_ID>`
 
 ## Settings
-Client settings load from `config/config.json` and `.env` (env wins). See
-`.env.example` for both client and OCR service variables.
+Client settings load from `.env` (and environment variables). See `.env.example`
+for both client and OCR service variables.
 
 ## Project Layout
 - `bot.py` CLI entrypoint
 - `src/mobile_rpa/` core implementation
-- `config/config.json` default config
 - `assets/flows/` flow definitions
 - `assets/templates/` template images
 - `outputs/` generated artifacts
 - `tools/platform-tools/` bundled ADB tools
 - `services/ocr_server/` FastAPI OCR service
+- `.env` runtime configuration
 
 ## Useful Commands
 - Dump UI hierarchy:
@@ -115,7 +115,7 @@ Notes:
 
 ## Cloud OCR Service
 `cv-detect` uses the cloud OCR service by default. Configure the endpoint in
-`config/config.json` under `ocr.remote_url` or via `OCR_REMOTE_URL`.
+`.env` via `OCR_REMOTE_URL`.
 
 Start the service:
 `uvicorn app:app --host 0.0.0.0 --port 8001 --app-dir services/ocr_server`
@@ -125,7 +125,6 @@ Notes:
 - For GPU, install `paddlepaddle-gpu` instead of `paddlepaddle`.
 - Set `OCR_DEVICE=gpu` on the server to force GPU.
 - If `OCR_API_KEY` is set on the server, clients must send `X-API-Key`.
-- Clients can set `ocr.api_key` in `config/config.json` or `OCR_API_KEY`.
 - Copy `.env.example` to `.env` in repo root to configure OCR defaults.
 
 ## CV + LLM Mode (Recommended)

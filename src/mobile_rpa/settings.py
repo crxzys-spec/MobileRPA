@@ -77,15 +77,6 @@ def load_settings(config_path: Optional[str]) -> ClientSettings:
         if not path.exists():
             raise FileNotFoundError("config not found: {}".format(path))
         data = _load_json(path)
-    else:
-        candidates = [
-            Path("config") / "config.json",
-            Path("config.json"),
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                data = _load_json(candidate)
-                break
     data = _apply_ocr_env_overrides(data or {})
     return ClientSettings(**data)
 
