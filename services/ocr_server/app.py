@@ -33,6 +33,32 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
+def _patch_paddle_analysis_config() -> None:
+    try:
+        import paddle
+    except Exception:
+        return
+    try:
+        lib = getattr(paddle, "base", None)
+        lib = getattr(lib, "libpaddle", None)
+        config_cls = getattr(lib, "AnalysisConfig", None)
+        if not config_cls or hasattr(config_cls, "set_optimization_level"):
+            return
+
+        def _set_optimization_level(self, level):  # type: ignore[no-redef]
+            try:
+                if hasattr(self, "set_tensorrt_optimization_level"):
+                    self.set_tensorrt_optimization_level(level)
+                elif hasattr(self, "tensorrt_optimization_level"):
+                    self.tensorrt_optimization_level = level
+            except Exception:
+                pass
+
+        setattr(config_cls, "set_optimization_level", _set_optimization_level)
+    except Exception:
+        return
+
+
 def _decode_image(png_bytes: bytes) -> np.ndarray:
     data = np.frombuffer(png_bytes, dtype=np.uint8)
     image = cv2.imdecode(data, cv2.IMREAD_COLOR)
@@ -96,6 +122,7 @@ def _ensure_paddleocr(lang: str, device: str):
     if cache_key in _OCR_CACHE:
         return _OCR_CACHE[cache_key]
 
+    _patch_paddle_analysis_config()
     try:
         ocr = PaddleOCR(**_build_paddleocr_kwargs(lang, device))
     except Exception as exc:
