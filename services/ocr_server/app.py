@@ -309,6 +309,107 @@ def _serialize_raw_result(result: Any) -> Any:
     return None if serialized is _RAW_DROP else serialized
 
 
+def _summarize_boxes(boxes: Any) -> List[Dict[str, Any]]:
+    if not isinstance(boxes, list):
+        return []
+    summary = []
+    for item in boxes:
+        if not isinstance(item, dict):
+            continue
+        bounds = _bounds_from_box(
+            item.get("coordinate")
+            or item.get("bbox")
+            or item.get("box")
+            or item.get("bounds")
+        )
+        summary.append(
+            {
+                "label": item.get("label"),
+                "score": item.get("score"),
+                "bounds": bounds,
+                "raw_box": item.get("coordinate") or item.get("bbox") or item.get("box"),
+            }
+        )
+    return summary
+
+
+def _summarize_ocr(ocr: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(ocr, dict):
+        return {}
+    texts = _coerce_list(ocr.get("rec_texts") or []) or []
+    scores = _coerce_list(ocr.get("rec_scores") or []) or []
+    boxes = _coerce_list(ocr.get("rec_boxes") or []) or []
+    polys = _coerce_list(ocr.get("rec_polys") or []) or []
+    lines = []
+    for i, text in enumerate(texts):
+        if text is None:
+            continue
+        score = scores[i] if i < len(scores) else None
+        bounds = None
+        if i < len(boxes):
+            bounds = _bounds_from_box(boxes[i])
+        if bounds is None and i < len(polys):
+            bounds = _bounds_from_box(polys[i])
+        lines.append(
+            {
+                "text": str(text),
+                "score": score,
+                "bounds": bounds,
+                "poly": polys[i] if i < len(polys) else None,
+            }
+        )
+    return {
+        "lines": lines,
+        "count": len(lines),
+        "text_det_params": ocr.get("text_det_params"),
+        "text_type": ocr.get("text_type"),
+        "model_settings": ocr.get("model_settings"),
+    }
+
+
+def _summarize_structure(raw_result: Any) -> Dict[str, Any]:
+    if isinstance(raw_result, list) and raw_result:
+        page = raw_result[0] if isinstance(raw_result[0], dict) else {}
+    elif isinstance(raw_result, dict):
+        page = raw_result
+    else:
+        return {}
+    layout = _summarize_boxes(
+        (page.get("layout_det_res") or {}).get("boxes")
+    )
+    regions = _summarize_boxes(
+        (page.get("region_det_res") or {}).get("boxes")
+    )
+    images = []
+    imgs = page.get("imgs_in_doc")
+    if isinstance(imgs, list):
+        for item in imgs:
+            if not isinstance(item, dict):
+                continue
+            images.append(
+                {
+                    "path": item.get("path"),
+                    "score": item.get("score"),
+                    "bounds": _bounds_from_box(item.get("coordinate")),
+                    "raw_box": item.get("coordinate"),
+                }
+            )
+    ocr_summary = _summarize_ocr(page.get("overall_ocr_res") or {})
+    return {
+        "page": {
+            "width": page.get("width"),
+            "height": page.get("height"),
+            "angle": (page.get("doc_preprocessor_res") or {}).get("angle"),
+        },
+        "layout_boxes": layout,
+        "region_boxes": regions,
+        "images": images,
+        "ocr": ocr_summary,
+        "parsing": page.get("parsing_res_list") or [],
+        "model_settings": page.get("model_settings"),
+    }
+
+
 def _extract_text(line: Any) -> Optional[Tuple[Any, str, float]]:
     if isinstance(line, dict):
         box = (
@@ -643,5 +744,7 @@ async def ocr_endpoint(
         "meta": {"width": width, "height": height, "lang": lang, "device": device},
     }
     if raw:
-        payload["raw_result"] = _serialize_raw_result(result)
+        raw_result = _serialize_raw_result(result)
+        payload["raw_result"] = raw_result
+        payload["structure"] = _summarize_structure(raw_result)
     return payload
