@@ -1392,15 +1392,40 @@ def annotate_elements(image, elements, width, height):
     ]
     for index, element in enumerate(elements, start=1):
         color = colors[(index - 1) % len(colors)]
-        x1 = clamp(scale_coord(element.get("x1"), width), 0, width - 1)
-        y1 = clamp(scale_coord(element.get("y1"), height), 0, height - 1)
-        x2 = clamp(scale_coord(element.get("x2"), width), 0, width - 1)
-        y2 = clamp(scale_coord(element.get("y2"), height), 0, height - 1)
+        bounds = element.get("bounds")
+        if bounds and len(bounds) == 4:
+            try:
+                vals = [float(value) for value in bounds]
+            except (TypeError, ValueError):
+                vals = None
+            if vals:
+                if max(vals) <= 1:
+                    x1 = clamp(int(round(vals[0] * width)), 0, width - 1)
+                    y1 = clamp(int(round(vals[1] * height)), 0, height - 1)
+                    x2 = clamp(int(round(vals[2] * width)), 0, width - 1)
+                    y2 = clamp(int(round(vals[3] * height)), 0, height - 1)
+                else:
+                    x1 = clamp(int(round(vals[0])), 0, width - 1)
+                    y1 = clamp(int(round(vals[1])), 0, height - 1)
+                    x2 = clamp(int(round(vals[2])), 0, width - 1)
+                    y2 = clamp(int(round(vals[3])), 0, height - 1)
+            else:
+                continue
+        else:
+            x1 = clamp(scale_coord(element.get("x1"), width), 0, width - 1)
+            y1 = clamp(scale_coord(element.get("y1"), height), 0, height - 1)
+            x2 = clamp(scale_coord(element.get("x2"), width), 0, width - 1)
+            y2 = clamp(scale_coord(element.get("y2"), height), 0, height - 1)
         if x2 <= x1 or y2 <= y1:
             continue
         cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
         label = element.get("label") or element.get("type") or "element"
-        draw_label(image, "{} {}".format(index, label), x1 + 6, y1 + 22, color)
+        text = element.get("text")
+        if text and is_ascii(text):
+            label = "{} {}".format(index, text[:12])
+        else:
+            label = "{} {}".format(index, label)
+        draw_label(image, label, x1 + 6, y1 + 22, color)
 
 
 def save_image(path, image):
