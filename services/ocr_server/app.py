@@ -103,19 +103,12 @@ def _build_paddleocr_kwargs(lang: str, device: str) -> Dict[str, Any]:
         elif "device" in params:
             kwargs["device"] = "cpu"
 
-    if "type" in params:
-        kwargs["type"] = "ocr"
-    elif "mode" in params:
-        kwargs["mode"] = "ocr"
-
     if "use_doc_orientation_classify" in params:
         kwargs["use_doc_orientation_classify"] = False
     if "use_doc_unwarping" in params:
         kwargs["use_doc_unwarping"] = False
     if "use_textline_orientation" in params:
         kwargs["use_textline_orientation"] = False
-    elif "use_angle_cls" in params:
-        kwargs["use_angle_cls"] = False
 
     return allow(kwargs)
 
@@ -142,6 +135,9 @@ def _ensure_paddleocr(lang: str, device: str):
 def _result_to_dict(item: Any) -> Optional[Dict[str, Any]]:
     if isinstance(item, dict):
         return item
+    res = getattr(item, "res", None)
+    if isinstance(res, dict):
+        return {"res": res}
     for attr in ("to_dict", "dict", "as_dict"):
         func = getattr(item, attr, None)
         if callable(func):
@@ -176,6 +172,7 @@ def _result_to_dict(item: Any) -> Optional[Dict[str, Any]]:
 def _normalize_result(result: Any) -> List[Any]:
     if result is None:
         return []
+    container_keys = ("ocr_result", "result", "data", "res")
     if isinstance(result, list):
         converted = []
         converted_any = False
@@ -191,21 +188,30 @@ def _normalize_result(result: Any) -> List[Any]:
         if result and all(isinstance(item, dict) for item in result):
             flattened = []
             for item in result:
-                for key in ("ocr_result", "result", "data", "res"):
-                    value = item.get(key)
-                    if isinstance(value, list):
-                        flattened.extend(value)
+                nested = None
+                for key in container_keys:
+                    if key in item:
+                        nested = item.get(key)
                         break
-                else:
+                if nested is None:
                     flattened.append(item)
+                elif isinstance(nested, list):
+                    flattened.extend(nested)
+                else:
+                    flattened.append(nested)
             result = flattened
     if isinstance(result, dict):
-        for key in ("ocr_result", "result", "data", "res"):
+        nested = None
+        for key in container_keys:
             if key in result:
-                result = result[key]
+                nested = result.get(key)
                 break
-        else:
+        if nested is None:
             return [result]
+        if isinstance(nested, list):
+            result = nested
+        else:
+            return [nested]
     if not isinstance(result, list) and isinstance(result, Iterable):
         result = list(result)
     if (
@@ -223,9 +229,11 @@ def _coerce_list(value: Any) -> Any:
         return None
     if hasattr(value, "tolist"):
         try:
-            return value.tolist()
+            value = value.tolist()
         except Exception:
             return value
+    if isinstance(value, list):
+        return [_coerce_list(item) for item in value]
     return value
 
 
@@ -264,8 +272,26 @@ def _extract_text(line: Any) -> Optional[Tuple[Any, str, float]]:
 def _bounds_from_box(box: Any) -> Optional[List[int]]:
     if box is None:
         return None
-    xs = [point[0] for point in box if isinstance(point, (list, tuple)) and len(point) >= 2]
-    ys = [point[1] for point in box if isinstance(point, (list, tuple)) and len(point) >= 2]
+    if hasattr(box, "tolist"):
+        try:
+            box = box.tolist()
+        except Exception:
+            pass
+    xs: List[float] = []
+    ys: List[float] = []
+    for point in box:
+        if hasattr(point, "tolist"):
+            try:
+                point = point.tolist()
+            except Exception:
+                pass
+        try:
+            x = point[0]
+            y = point[1]
+        except Exception:
+            continue
+        xs.append(x)
+        ys.append(y)
     if not xs or not ys:
         return None
     return [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
@@ -314,8 +340,10 @@ def _parse_ocr_result(
                     bounds = _bounds_from_box(polys[i])
                 elif boxes and i < len(boxes):
                     box = boxes[i]
-                    if isinstance(box, (list, tuple)) and len(box) == 4:
+                    try:
                         bounds = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+                    except Exception:
+                        bounds = None
                 if not bounds:
                     continue
                 if offset:

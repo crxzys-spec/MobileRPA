@@ -144,19 +144,12 @@ def ensure_paddleocr(
             elif "device" in params:
                 base_kwargs["device"] = "cpu"
 
-        if "type" in params:
-            base_kwargs["type"] = "ocr"
-        elif "mode" in params:
-            base_kwargs["mode"] = "ocr"
-
         if "use_doc_orientation_classify" in params:
             base_kwargs["use_doc_orientation_classify"] = False
         if "use_doc_unwarping" in params:
             base_kwargs["use_doc_unwarping"] = False
         if "use_textline_orientation" in params:
             base_kwargs["use_textline_orientation"] = False
-        elif "use_angle_cls" in params:
-            base_kwargs["use_angle_cls"] = False
 
         candidates = []
         if extra_kwargs:
@@ -756,6 +749,9 @@ def detect_templates(screen, template_dir, threshold=0.85, offset=None):
 def _result_to_dict(item):
     if isinstance(item, dict):
         return item
+    res = getattr(item, "res", None)
+    if isinstance(res, dict):
+        return {"res": res}
     for attr in ("to_dict", "dict", "as_dict"):
         func = getattr(item, attr, None)
         if callable(func):
@@ -792,9 +788,11 @@ def _coerce_list(value):
         return None
     if hasattr(value, "tolist"):
         try:
-            return value.tolist()
+            value = value.tolist()
         except Exception:
             return value
+    if isinstance(value, list):
+        return [_coerce_list(item) for item in value]
     return value
 
 
@@ -810,16 +808,26 @@ def _get_value(mapping, keys, default):
 def bounds_from_box(box):
     if box is None:
         return None
-    xs = [
-        point[0]
-        for point in box
-        if isinstance(point, (list, tuple)) and len(point) >= 2
-    ]
-    ys = [
-        point[1]
-        for point in box
-        if isinstance(point, (list, tuple)) and len(point) >= 2
-    ]
+    if hasattr(box, "tolist"):
+        try:
+            box = box.tolist()
+        except Exception:
+            pass
+    xs = []
+    ys = []
+    for point in box:
+        if hasattr(point, "tolist"):
+            try:
+                point = point.tolist()
+            except Exception:
+                pass
+        try:
+            x = point[0]
+            y = point[1]
+        except Exception:
+            continue
+        xs.append(x)
+        ys.append(y)
     if not xs or not ys:
         return None
     return [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
@@ -827,6 +835,7 @@ def bounds_from_box(box):
 
 def parse_ocr_result(result, score_threshold=0.5, offset=None):
     lines = result
+    container_keys = ("ocr_result", "result", "data", "res")
     if isinstance(lines, list):
         converted = []
         converted_any = False
@@ -842,21 +851,30 @@ def parse_ocr_result(result, score_threshold=0.5, offset=None):
         if lines and all(isinstance(item, dict) for item in lines):
             flattened = []
             for item in lines:
-                for key in ("ocr_result", "result", "data", "res"):
-                    value = item.get(key)
-                    if isinstance(value, list):
-                        flattened.extend(value)
+                nested = None
+                for key in container_keys:
+                    if key in item:
+                        nested = item.get(key)
                         break
-                else:
+                if nested is None:
                     flattened.append(item)
+                elif isinstance(nested, list):
+                    flattened.extend(nested)
+                else:
+                    flattened.append(nested)
             lines = flattened
     if isinstance(lines, dict):
-        for key in ("ocr_result", "result", "data", "res"):
+        nested = None
+        for key in container_keys:
             if key in lines:
-                lines = lines[key]
+                nested = lines.get(key)
                 break
-        else:
+        if nested is None:
             lines = [lines]
+        elif isinstance(nested, list):
+            lines = nested
+        else:
+            lines = [nested]
     if not isinstance(lines, list) and hasattr(lines, "__iter__"):
         lines = list(lines)
     if (
@@ -890,8 +908,10 @@ def parse_ocr_result(result, score_threshold=0.5, offset=None):
                     bounds = bounds_from_box(polys[i])
                 elif boxes and i < len(boxes):
                     box = boxes[i]
-                    if isinstance(box, (list, tuple)) and len(box) == 4:
+                    try:
                         bounds = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+                    except Exception:
+                        bounds = None
                 if not bounds:
                     continue
                 bounds = offset_bounds(bounds, offset)
@@ -910,7 +930,9 @@ def parse_ocr_result(result, score_threshold=0.5, offset=None):
                     }
                 )
             continue
-        if not line:
+        if line is None:
+            continue
+        if isinstance(line, (list, tuple, dict)) and not line:
             continue
         box = None
         text = None
@@ -946,21 +968,11 @@ def parse_ocr_result(result, score_threshold=0.5, offset=None):
         text = str(text).strip()
         if not text or float(score) < score_threshold:
             continue
-        if not box:
+        if box is None:
             continue
-        xs = [
-            point[0]
-            for point in box
-            if isinstance(point, (list, tuple)) and len(point) >= 2
-        ]
-        ys = [
-            point[1]
-            for point in box
-            if isinstance(point, (list, tuple)) and len(point) >= 2
-        ]
-        if not xs or not ys:
+        bounds = bounds_from_box(box)
+        if not bounds:
             continue
-        bounds = [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
         bounds = offset_bounds(bounds, offset)
         index += 1
         element_id = unique_id("ocr:{}".format(index), used_ids)
