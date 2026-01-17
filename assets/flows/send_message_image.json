@@ -1,0 +1,59 @@
+{
+  "name": "send_message_image",
+  "meta": {
+    "note": "Create template images under assets/templates/ and update paths below."
+  },
+  "steps": [
+    {
+      "action": "start_app",
+      "package": "com.tencent.mm",
+      "activity": "com.tencent.mm.ui.LauncherUI"
+    },
+    {
+      "action": "wait",
+      "seconds": 2
+    },
+    {
+      "action": "tap_image",
+      "image": "assets/templates/search.png",
+      "threshold": 0.85,
+      "timeout": 5
+    },
+    {
+      "action": "wait",
+      "seconds": 1
+    },
+    {
+      "action": "text",
+      "value": "Alice"
+    },
+    {
+      "action": "keyevent",
+      "keycode": 66
+    },
+    {
+      "action": "wait",
+      "seconds": 1
+    },
+    {
+      "action": "tap_image",
+      "image": "assets/templates/contact_row.png",
+      "threshold": 0.85,
+      "timeout": 5
+    },
+    {
+      "action": "wait",
+      "seconds": 1
+    },
+    {
+      "action": "text",
+      "value": "Hello from adb bot"
+    },
+    {
+      "action": "tap_image",
+      "image": "assets/templates/send.png",
+      "threshold": 0.85,
+      "timeout": 5
+    }
+  ]
+}

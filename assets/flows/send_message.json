@@ -1,0 +1,57 @@
+{
+  "name": "send_message",
+  "meta": {
+    "note": "Update text labels/coords to match your WeChat UI language and screen size."
+  },
+  "steps": [
+    {
+      "action": "start_app",
+      "package": "com.tencent.mm",
+      "activity": "com.tencent.mm.ui.LauncherUI"
+    },
+    {
+      "action": "wait",
+      "seconds": 2
+    },
+    {
+      "action": "tap_text",
+      "text": "Search",
+      "exact": false,
+      "timeout": 5
+    },
+    {
+      "action": "wait",
+      "seconds": 1
+    },
+    {
+      "action": "text",
+      "value": "Alice"
+    },
+    {
+      "action": "keyevent",
+      "keycode": 66
+    },
+    {
+      "action": "wait",
+      "seconds": 1
+    },
+    {
+      "action": "tap_text",
+      "text": "Alice",
+      "exact": true,
+      "timeout": 5
+    },
+    {
+      "action": "wait",
+      "seconds": 1
+    },
+    {
+      "action": "text",
+      "value": "Hello from adb bot"
+    },
+    {
+      "action": "keyevent",
+      "keycode": 66
+    }
+  ]
+}

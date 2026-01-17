@@ -1,0 +1,11 @@
+{
+  "adb_path": "tools\\platform-tools\\adb.exe",
+  "device_id": "",
+  "ocr": {
+    "provider": "remote",
+    "remote_url": "http://127.0.0.1:8001/ocr",
+    "timeout": 30,
+    "api_key": "",
+    "device": "auto"
+  }
+}
