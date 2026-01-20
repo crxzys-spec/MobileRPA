@@ -3,11 +3,13 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+APPS = ROOT / "apps"
+if str(APPS) not in sys.path:
+    sys.path.insert(0, str(APPS))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from mobile_rpa.cli import main  # noqa: E402
+from mrpa.cli import main  # noqa: E402
 
 
 if __name__ == "__main__":

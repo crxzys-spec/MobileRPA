@@ -1,0 +1,11 @@
+{
+  "name": "input_text",
+  "description": "Optionally tap a field by label and then input text.",
+  "handler": "input_text",
+  "params": {
+    "value": "string",
+    "target_text": "string (optional)",
+    "match": "contains|exact (optional)",
+    "source": "elements|ui|both (optional)"
+  }
+}

@@ -1,0 +1,13 @@
+--extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/
+fastapi
+pydantic-settings
+python-dotenv
+uvicorn[standard]
+python-multipart
+opencv-python-headless
+numpy
+packaging
+safetensors
+paddlex[ocr]
+paddleocr
+paddlepaddle-gpu==3.2.2

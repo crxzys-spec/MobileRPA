@@ -1,0 +1,10 @@
+{
+  "name": "swipe_direction",
+  "description": "Swipe in a direction by a ratio of the screen size.",
+  "handler": "swipe_direction",
+  "params": {
+    "direction": "up|down|left|right",
+    "distance": "0.1..0.9 (optional, default 0.6)",
+    "duration_ms": "integer (optional)"
+  }
+}

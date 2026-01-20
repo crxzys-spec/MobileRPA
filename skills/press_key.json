@@ -1,0 +1,8 @@
+{
+  "name": "press_key",
+  "description": "Send a keyevent to the device (e.g. BACK, HOME).",
+  "handler": "press_key",
+  "params": {
+    "keycode": "string or number"
+  }
+}

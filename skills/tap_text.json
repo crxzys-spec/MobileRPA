@@ -1,0 +1,10 @@
+{
+  "name": "tap_text",
+  "description": "Tap the first OCR/UI element whose text matches the given string.",
+  "handler": "tap_text",
+  "params": {
+    "text": "string",
+    "match": "contains|exact (optional)",
+    "source": "elements|ui|both (optional)"
+  }
+}

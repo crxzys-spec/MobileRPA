@@ -1,6 +1,12 @@
 --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/
 aiohttp
+aiortc
+av
+fastapi
+numpy
+uvicorn
 opencv-python
+jsonschema
 pydantic-settings
 python-dotenv
 paddleocr

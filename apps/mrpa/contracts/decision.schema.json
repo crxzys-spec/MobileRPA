@@ -1,0 +1,286 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["done"],
+  "properties": {
+    "done": {
+      "type": "boolean"
+    },
+    "done_reason": {
+      "type": ["string", "null"]
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/action"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "done": {
+            "const": true
+          }
+        },
+        "required": ["done"]
+      },
+      "then": {
+        "properties": {
+          "actions": {
+            "maxItems": 0
+          }
+        }
+      },
+      "else": {
+        "required": ["actions"]
+      }
+    }
+  ],
+  "$defs": {
+    "numOrStr": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string",
+          "pattern": "^-?\\d+(\\.\\d+)?$"
+        }
+      ]
+    },
+    "textValue": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        }
+      ]
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "optString": {
+      "type": ["string", "null"]
+    },
+    "optNumber": {
+      "type": ["number", "null"]
+    },
+    "optNumOrStr": {
+      "oneOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string",
+          "pattern": "^-?\\d+(\\.\\d+)?$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "keycode": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "number"
+        }
+      ]
+    },
+    "action": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/actionTap"
+        },
+        {
+          "$ref": "#/$defs/actionTapElement"
+        },
+        {
+          "$ref": "#/$defs/actionSwipe"
+        },
+        {
+          "$ref": "#/$defs/actionText"
+        },
+        {
+          "$ref": "#/$defs/actionKeyevent"
+        },
+        {
+          "$ref": "#/$defs/actionWait"
+        }
+      ]
+    },
+    "actionTap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "const": "tap"
+        },
+        "x": {
+          "$ref": "#/$defs/numOrStr"
+        },
+        "y": {
+          "$ref": "#/$defs/numOrStr"
+        },
+        "target_id": {
+          "$ref": "#/$defs/id"
+        },
+        "element_id": {
+          "$ref": "#/$defs/id"
+        },
+        "reason": {
+          "$ref": "#/$defs/optString"
+        },
+        "confidence": {
+          "$ref": "#/$defs/optNumOrStr"
+        }
+      },
+      "anyOf": [
+        {
+          "required": ["x", "y"]
+        },
+        {
+          "required": ["target_id"]
+        },
+        {
+          "required": ["element_id"]
+        }
+      ]
+    },
+    "actionTapElement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "const": "tap_element"
+        },
+        "target_id": {
+          "$ref": "#/$defs/id"
+        },
+        "element_id": {
+          "$ref": "#/$defs/id"
+        },
+        "reason": {
+          "$ref": "#/$defs/optString"
+        },
+        "confidence": {
+          "$ref": "#/$defs/optNumOrStr"
+        }
+      },
+      "anyOf": [
+        {
+          "required": ["target_id"]
+        },
+        {
+          "required": ["element_id"]
+        }
+      ]
+    },
+    "actionSwipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "x1", "y1", "x2", "y2"],
+      "properties": {
+        "type": {
+          "const": "swipe"
+        },
+        "x1": {
+          "$ref": "#/$defs/numOrStr"
+        },
+        "y1": {
+          "$ref": "#/$defs/numOrStr"
+        },
+        "x2": {
+          "$ref": "#/$defs/numOrStr"
+        },
+        "y2": {
+          "$ref": "#/$defs/numOrStr"
+        },
+        "duration_ms": {
+          "$ref": "#/$defs/numOrStr"
+        },
+        "reason": {
+          "$ref": "#/$defs/optString"
+        },
+        "confidence": {
+          "$ref": "#/$defs/optNumOrStr"
+        }
+      }
+    },
+    "actionText": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": {
+          "const": "text"
+        },
+        "value": {
+          "$ref": "#/$defs/textValue"
+        },
+        "target_id": {
+          "$ref": "#/$defs/id"
+        },
+        "element_id": {
+          "$ref": "#/$defs/id"
+        },
+        "reason": {
+          "$ref": "#/$defs/optString"
+        },
+        "confidence": {
+          "$ref": "#/$defs/optNumOrStr"
+        }
+      }
+    },
+    "actionKeyevent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "keycode"],
+      "properties": {
+        "type": {
+          "const": "keyevent"
+        },
+        "keycode": {
+          "$ref": "#/$defs/keycode"
+        },
+        "reason": {
+          "$ref": "#/$defs/optString"
+        },
+        "confidence": {
+          "$ref": "#/$defs/optNumOrStr"
+        }
+      }
+    },
+    "actionWait": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "const": "wait"
+        },
+        "seconds": {
+          "$ref": "#/$defs/numOrStr"
+        },
+        "reason": {
+          "$ref": "#/$defs/optString"
+        },
+        "confidence": {
+          "$ref": "#/$defs/optNumOrStr"
+        }
+      }
+    }
+  }
+}

@@ -1,5 +1,11 @@
 aiohttp
+aiortc
+av
+fastapi
+numpy
+uvicorn
 opencv-python
+jsonschema
 pydantic-settings
 python-dotenv
 paddleocr
