@@ -33,9 +33,11 @@ fallbacks if `LLM_*` is unset.
 ## Project Layout
 - `bot.py` CLI entrypoint
 - `apps/mrpa/` core implementation
+- `apps/mrpa/api/` MRPA API server + WebRTC streaming
 - `outputs/` generated artifacts
 - `tools/platform-tools/` bundled ADB tools
 - `apps/ocr_server/` FastAPI OCR service
+- `apps/studio/` Studio UI (Vue 3)
 - `.env` runtime configuration
 
 ## Useful Commands
@@ -43,9 +45,17 @@ fallbacks if `LLM_*` is unset.
   `python bot.py agent --goal "Go back" --execute --max-steps 3`
 
 ## MRPA Studio UI
-- Install deps: `pip install -r apps/mrpa_studio/requirements.txt`
-- Start the UI: `uvicorn app:app --reload --port 8020 --app-dir apps/mrpa_studio`
-- Open `http://127.0.0.1:8020` in your browser
+- Start MRPA API: `python -m uvicorn apps.mrpa.server:app --reload --port 8020`
+- Build + serve UI from backend (prod):
+  - `cd apps/studio && npm install && npm run build`
+  - Set `MRPA_SERVE_STUDIO=true`
+  - Open `http://127.0.0.1:8020`
+- Run UI separately in dev:
+  - `cd apps/studio && npm install && npm run dev`
+  - Set `MRPA_SERVE_STUDIO=false` and `MRPA_CORS_ORIGINS=http://127.0.0.1:8081`
+  - Set `VITE_API_BASE=http://127.0.0.1:8020` when the API runs on a different origin
+  - Open `http://127.0.0.1:8081`
+- Optional: `npm run typecheck`
 - Live stream uses `adb` + `ffmpeg`. Optional env: `MRPA_STREAM_FPS`, `MRPA_STREAM_SCALE`, `MRPA_STREAM_BITRATE`.
 - For 30fps on devices without `screenrecord --output-format`, use scrcpy (auto-detected from `tools/scrcpy`).
 - Override stream driver with `MRPA_STREAM_DRIVER=scrcpy|screenrecord|screencap`.

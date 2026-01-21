@@ -1,0 +1,23 @@
+{
+  "name": "mrpa-studio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 8081",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 8081",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "pinia": "^2.1.7",
+    "vue": "^3.4.31",
+    "vue-i18n": "^9.13.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.1.2",
+    "typescript": "^5.5.4",
+    "vue-tsc": "^2.1.4",
+    "vite": "^5.4.0"
+  }
+}

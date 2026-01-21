@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 outputs/
+apps/studio/node_modules/
+apps/studio/dist/
+apps/studio/.env*
+apps/studio/.vite/

@@ -1,11 +1,13 @@
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 from infra.adb import AdbClient
 from mrpa.agent import AgentConfig, AgentRuntime
 from shared.errors import AdbError
+from mrpa.constants import ROOT_DIR
 from mrpa.settings import build_llm_config, load_settings
 
 
@@ -18,6 +20,15 @@ def resolve_device_id(adb, device_id):
     if len(devices) > 1:
         raise AdbError("multiple devices attached, pass --device")
     return devices[0]
+
+def _resolve_adb_path(configured: str | None) -> str:
+    if configured:
+        return configured
+    adb_name = "adb.exe" if os.name == "nt" else "adb"
+    bundled = ROOT_DIR / "tools" / "platform-tools" / adb_name
+    if bundled.exists():
+        return str(bundled)
+    return "adb"
 
 
 def build_parser():
@@ -225,7 +236,7 @@ def main():
         settings = load_settings(args.config)
     except FileNotFoundError as exc:
         raise AdbError(str(exc)) from exc
-    adb_path = args.adb_path or settings.adb_path or "adb"
+    adb_path = _resolve_adb_path(args.adb_path or settings.adb_path)
     device_id = args.device or settings.device_id or None
 
     adb = AdbClient(

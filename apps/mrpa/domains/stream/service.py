@@ -13,11 +13,10 @@ import time
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-from apps.mrpa_studio.settings import StudioSettings
+from fastapi import HTTPException
+from ...constants import OUTPUTS_DIR, ROOT_DIR
+from ...settings import ServerSettings
+from ...api.schemas import WebRTCOffer
 from aiortc import (
     MediaStreamTrack,
     RTCPeerConnection,
@@ -36,11 +35,6 @@ import cv2
 import numpy as np
 
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-OUTPUTS_DIR = ROOT_DIR / "outputs"
-STATIC_DIR = Path(__file__).parent / "static"
-
-RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9:._-]+$")
 
 def _resolve_adb_path(configured: Optional[str]) -> str:
@@ -102,7 +96,7 @@ def _resolve_scrcpy_server_path(
     return "scrcpy-server"
 
 
-SETTINGS = StudioSettings()
+SETTINGS = ServerSettings()
 
 ADB_PATH = _resolve_adb_path(SETTINGS.adb_path)
 FFMPEG_PATH = _resolve_ffmpeg_path(SETTINGS.ffmpeg_path)
@@ -137,204 +131,6 @@ _SCREENRECORD_CAPS: Dict[str, bool] = {}
 _SCREEN_SIZE_CACHE: Dict[str, Tuple[int, int]] = {}
 _H264_PROFILE_CACHE: Dict[str, str] = {}
 _SCRCPY_PROFILE_CACHE: Dict[str, str] = {}
-
-
-class RunRequest(BaseModel):
-    goal: str = Field(min_length=1)
-    device: Optional[str] = None
-    execute: bool = True
-    plan: bool = True
-    plan_max_steps: int = 5
-    plan_verify: str = "llm"
-    plan_resume: bool = True
-    max_steps: int = 5
-    max_actions: int = 5
-    skills: bool = False
-    skills_only: bool = False
-    text_only: bool = False
-    decision_mode: Optional[str] = None
-
-
-class WebRTCOffer(BaseModel):
-    sdp: str
-    type: str
-    device_id: str = Field(min_length=1)
-
-
-class RunManager:
-    def __init__(self, outputs_dir: Path) -> None:
-        self._outputs_dir = outputs_dir
-        self._lock = threading.Lock()
-        self._processes: Dict[str, subprocess.Popen] = {}
-
-    def start_run(self, request: RunRequest) -> Dict[str, object]:
-        run_id = self._new_run_id()
-        run_dir = self._outputs_dir / run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
-        output_path = run_dir / "result.json"
-        log_path = run_dir / "run.log"
-
-        cmd = self._build_command(request, run_dir, output_path)
-        metadata = {
-            "id": run_id,
-            "goal": request.goal,
-            "device_id": request.device,
-            "status": "running",
-            "start_time": time.time(),
-            "command": cmd,
-            "trace_dir": str(run_dir),
-            "output_path": str(output_path),
-            "log_path": str(log_path),
-        }
-        self._write_run_metadata(run_dir, metadata)
-
-        log_file = open(log_path, "w", encoding="utf-8")
-        process = subprocess.Popen(
-            cmd,
-            cwd=str(ROOT_DIR),
-            stdout=log_file,
-            stderr=log_file,
-            text=True,
-        )
-        metadata["pid"] = process.pid
-        self._write_run_metadata(run_dir, metadata)
-        with self._lock:
-            self._processes[run_id] = process
-        thread = threading.Thread(
-            target=self._watch_run,
-            args=(run_id, run_dir, process, log_file),
-            daemon=True,
-        )
-        thread.start()
-        return metadata
-
-    def stop_run(self, run_id: str) -> Dict[str, object]:
-        run_id = _validate_run_id(run_id)
-        with self._lock:
-            process = self._processes.get(run_id)
-        run_dir = self._outputs_dir / run_id
-        metadata = _read_json(run_dir / "run.json") or {"id": run_id}
-        if not process:
-            pid = metadata.get("pid")
-            if not pid:
-                pid = _find_pid_by_hint(run_id)
-            if not pid:
-                raise HTTPException(status_code=404, detail="run not active")
-            _terminate_pid(pid)
-            metadata["pid"] = pid
-        else:
-            _terminate_process(process)
-            metadata["pid"] = process.pid
-        metadata["status"] = "stopping"
-        metadata["stop_requested"] = time.time()
-        self._write_run_metadata(run_dir, metadata)
-        return {"id": run_id, "status": "stopping"}
-
-    def list_runs(self) -> List[Dict[str, object]]:
-        if not self._outputs_dir.exists():
-            return []
-        runs = []
-        for item in sorted(self._outputs_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-            if not item.is_dir():
-                continue
-            run_id = item.name
-            if not RUN_ID_RE.match(run_id):
-                continue
-            metadata = _read_json(item / "run.json") or {}
-            metadata.setdefault("id", run_id)
-            metadata.setdefault("trace_dir", str(item))
-            metadata["updated_time"] = item.stat().st_mtime
-            with self._lock:
-                process = self._processes.get(run_id)
-            dirty = False
-            if process and metadata.get("status") == "running":
-                metadata["pid"] = process.pid
-                dirty = True
-            pid = metadata.get("pid")
-            status = (metadata.get("status") or "").lower()
-            if pid and status in ("running", "stopping") and not _is_pid_running(pid):
-                metadata["status"] = "stopped"
-                metadata.setdefault("end_time", time.time())
-                metadata.setdefault("exit_code", -1)
-                dirty = True
-            if dirty:
-                self._write_run_metadata(item, metadata)
-            runs.append(metadata)
-        return runs
-
-    def _build_command(self, request: RunRequest, run_dir: Path, output_path: Path) -> List[str]:
-        cmd = [
-            sys.executable,
-            str(ROOT_DIR / "bot.py"),
-            "agent",
-            "--goal",
-            request.goal,
-            "--max-steps",
-            str(request.max_steps),
-            "--max-actions",
-            str(request.max_actions),
-            "--trace-dir",
-            str(run_dir),
-            "--output",
-            str(output_path),
-        ]
-        if request.device:
-            cmd.extend(["--device", request.device])
-        if request.execute:
-            cmd.append("--execute")
-        if request.text_only:
-            cmd.append("--text-only")
-        if request.decision_mode:
-            cmd.extend(["--decision-mode", request.decision_mode])
-        if request.plan:
-            cmd.append("--plan")
-        cmd.extend(["--plan-max-steps", str(request.plan_max_steps)])
-        cmd.extend(["--plan-verify", request.plan_verify])
-        if not request.plan_resume:
-            cmd.append("--no-plan-resume")
-        if request.skills:
-            cmd.append("--skills")
-        if request.skills_only:
-            cmd.append("--skills-only")
-        return cmd
-
-    def _new_run_id(self) -> str:
-        base = time.strftime("run_%Y%m%d_%H%M%S")
-        run_id = base
-        index = 1
-        while (self._outputs_dir / run_id).exists():
-            index += 1
-            run_id = "{}_{}".format(base, index)
-        return run_id
-
-    def _write_run_metadata(self, run_dir: Path, metadata: Dict[str, object]) -> None:
-        (run_dir / "run.json").write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-    def _watch_run(
-        self,
-        run_id: str,
-        run_dir: Path,
-        process: subprocess.Popen,
-        log_file,
-    ) -> None:
-        exit_code = process.wait()
-        log_file.close()
-        metadata = _read_json(run_dir / "run.json") or {}
-        metadata["end_time"] = time.time()
-        metadata["exit_code"] = exit_code
-        metadata["status"] = "finished" if exit_code == 0 else "failed"
-        self._write_run_metadata(run_dir, metadata)
-        with self._lock:
-            self._processes.pop(run_id, None)
-
-
-def _validate_run_id(run_id: str) -> str:
-    if not RUN_ID_RE.match(run_id):
-        raise HTTPException(status_code=400, detail="invalid run id")
-    return run_id
 
 
 def _validate_device_id(device_id: str) -> str:
@@ -2270,66 +2066,29 @@ async def _wait_for_ice_gathering(pc: RTCPeerConnection) -> None:
     await done.wait()
 
 
-def _list_steps(run_dir: Path) -> List[Dict[str, object]]:
-    steps = []
-    for step_dir in sorted(run_dir.glob("step_*")):
-        if not step_dir.is_dir():
-            continue
-        step_id = step_dir.name
-        decision = _read_json(step_dir / "decision.json") or {}
-        steps.append(
-            {
-                "id": step_id,
-                "decision": decision,
-                "has_screen": (step_dir / "screen.png").exists(),
-                "updated_time": step_dir.stat().st_mtime,
-            }
-        )
-    return steps
-
-
-def _step_payload(run_id: str, step_id: str, step_dir: Path) -> Dict[str, object]:
-    return {
-        "run_id": run_id,
-        "step_id": step_id,
-        "decision": _read_json(step_dir / "decision.json"),
-        "prompt": _read_text(step_dir / "prompt.txt"),
-        "response": _read_text(step_dir / "response.txt"),
-        "context": _read_json(step_dir / "context.json"),
-        "ocr_payload": _read_json(step_dir / "ocr_payload.json"),
-        "verification": _read_json(step_dir / "verification.json"),
-        "screen_url": "/outputs/{}/{}".format(run_id, "screen.png"),
-        "step_screen_url": "/outputs/{}/{}".format(run_id, "{}/screen.png".format(step_id)),
-        "step_after_url": "/outputs/{}/{}".format(run_id, "{}/screen_after.png".format(step_id)),
-    }
-
-
-app = FastAPI()
-OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-run_manager = RunManager(OUTPUTS_DIR)
 pcs: Set[RTCPeerConnection] = set()
 
 
-@app.on_event("shutdown")
-async def shutdown_event() -> None:
+def shutdown() -> None:
     coros = [pc.close() for pc in pcs]
     if coros:
-        await asyncio.gather(*coros, return_exceptions=True)
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(asyncio.gather(*coros, return_exceptions=True))
+        finally:
+            loop.close()
     pcs.clear()
 
 
-@app.get("/api/runs")
-def list_runs():
-    return JSONResponse(run_manager.list_runs())
+def validate_device_id(device_id: str) -> str:
+    return _validate_device_id(device_id)
 
 
-@app.get("/api/devices")
-def list_devices():
-    return JSONResponse(_list_adb_devices())
+def list_devices() -> List[Dict[str, str]]:
+    return _list_adb_devices()
 
 
-@app.get("/api/stream/{device_id}.mjpg")
-def stream_device(device_id: str):
+def mjpeg_stream(device_id: str) -> Iterable[bytes]:
     device_id = _validate_device_id(device_id)
     devices = _list_adb_devices()
     match = next((item for item in devices if item["id"] == device_id), None)
@@ -2337,20 +2096,14 @@ def stream_device(device_id: str):
         raise HTTPException(status_code=404, detail="device not found")
     if match.get("status") != "device":
         raise HTTPException(status_code=409, detail="device not ready")
-    generator = _mjpeg_stream(device_id)
-    return StreamingResponse(
-        generator,
-        media_type="multipart/x-mixed-replace; boundary=frame",
-    )
+    return _mjpeg_stream(device_id)
 
 
-@app.get("/api/webrtc/config")
-def webrtc_config():
-    return JSONResponse({"ice_servers": WEBRTC_ICE_URLS})
+def webrtc_config() -> Dict[str, List[str]]:
+    return {"ice_servers": WEBRTC_ICE_URLS}
 
 
-@app.post("/api/webrtc/offer")
-async def webrtc_offer(payload: WebRTCOffer):
+async def webrtc_offer(payload: WebRTCOffer) -> RTCSessionDescription:
     device_id = _validate_device_id(payload.device_id)
     if payload.type != "offer":
         raise HTTPException(status_code=400, detail="invalid sdp type")
@@ -2478,50 +2231,9 @@ async def webrtc_offer(payload: WebRTCOffer):
                 flush=True,
             )
     await _wait_for_ice_gathering(pc)
-    return JSONResponse(
-        {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+    return RTCSessionDescription(
+        sdp=pc.localDescription.sdp,
+        type=pc.localDescription.type,
     )
 
 
-@app.get("/api/runs/{run_id}")
-def get_run(run_id: str):
-    run_id = _validate_run_id(run_id)
-    run_dir = OUTPUTS_DIR / run_id
-    if not run_dir.exists():
-        raise HTTPException(status_code=404, detail="run not found")
-    metadata = _read_json(run_dir / "run.json") or {"id": run_id}
-    metadata["steps"] = _list_steps(run_dir)
-    return JSONResponse(metadata)
-
-
-@app.get("/api/runs/{run_id}/steps/{step_id}")
-def get_step(run_id: str, step_id: str):
-    run_id = _validate_run_id(run_id)
-    if not RUN_ID_RE.match(step_id):
-        raise HTTPException(status_code=400, detail="invalid step id")
-    step_dir = OUTPUTS_DIR / run_id / step_id
-    if not step_dir.exists():
-        raise HTTPException(status_code=404, detail="step not found")
-    return JSONResponse(_step_payload(run_id, step_id, step_dir))
-
-
-@app.post("/api/run")
-def start_run(payload: RunRequest):
-    if payload.plan_verify not in ("llm", "none"):
-        raise HTTPException(status_code=400, detail="invalid plan_verify value")
-    if payload.max_steps <= 0:
-        raise HTTPException(status_code=400, detail="max_steps must be positive")
-    if payload.plan_max_steps <= 0:
-        raise HTTPException(status_code=400, detail="plan_max_steps must be positive")
-    if payload.device:
-        _validate_device_id(payload.device)
-    return JSONResponse(run_manager.start_run(payload))
-
-
-@app.post("/api/runs/{run_id}/stop")
-def stop_run(run_id: str):
-    return JSONResponse(run_manager.stop_run(run_id))
-
-
-app.mount("/outputs", StaticFiles(directory=str(OUTPUTS_DIR)), name="outputs")
-app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
