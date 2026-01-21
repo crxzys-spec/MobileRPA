@@ -227,6 +227,50 @@ class ServerSettings(BaseSettings):
         default="",
         validation_alias=AliasChoices("MRPA_CORS_ORIGINS", "CORS_ORIGINS"),
     )
+    client_url: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("MRPA_CLIENT_URL", "CLIENT_URL"),
+    )
+    client_timeout: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices("MRPA_CLIENT_TIMEOUT", "CLIENT_TIMEOUT"),
+    )
+    client_mode: str = Field(
+        default="local",
+        validation_alias=AliasChoices("MRPA_CLIENT_MODE", "CLIENT_MODE"),
+    )
+    client_token: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("MRPA_CLIENT_TOKEN", "CLIENT_TOKEN"),
+    )
+    client_ws_path: str = Field(
+        default="/ws/client",
+        validation_alias=AliasChoices("MRPA_CLIENT_WS_PATH", "CLIENT_WS_PATH"),
+    )
+    client_ws_trace: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "MRPA_CLIENT_WS_TRACE", "CLIENT_WS_TRACE"
+        ),
+    )
+    client_inactive_seconds: float = Field(
+        default=15.0,
+        validation_alias=AliasChoices(
+            "MRPA_CLIENT_INACTIVE_SEC", "CLIENT_INACTIVE_SEC"
+        ),
+    )
+    client_evict_seconds: float = Field(
+        default=60.0,
+        validation_alias=AliasChoices(
+            "MRPA_CLIENT_EVICT_SEC", "CLIENT_EVICT_SEC"
+        ),
+    )
+    client_sweep_interval: float = Field(
+        default=5.0,
+        validation_alias=AliasChoices(
+            "MRPA_CLIENT_SWEEP_INTERVAL", "CLIENT_SWEEP_INTERVAL"
+        ),
+    )
 
     stream_fps: int = Field(default=30, validation_alias="MRPA_STREAM_FPS")
     stream_scale: int = Field(default=0, validation_alias="MRPA_STREAM_SCALE")
@@ -289,6 +333,9 @@ class ServerSettings(BaseSettings):
         "scrcpy_video_options",
         "webrtc_ice",
         "cors_origins",
+        "client_url",
+        "client_token",
+        "client_ws_path",
         mode="before",
     )
     @classmethod
@@ -302,6 +349,7 @@ class ServerSettings(BaseSettings):
         "webrtc_source",
         "scrcpy_log_level",
         "forced_h264_profile",
+        "client_mode",
         mode="before",
     )
     @classmethod

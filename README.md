@@ -34,11 +34,13 @@ fallbacks if `LLM_*` is unset.
 - `bot.py` CLI entrypoint
 - `apps/mrpa/` core implementation
 - `apps/mrpa/api/` MRPA API server + WebRTC streaming
+- `apps/client/` device-side API (ADB + streaming)
 - `outputs/` generated artifacts
 - `tools/platform-tools/` bundled ADB tools
 - `apps/ocr_server/` FastAPI OCR service
 - `apps/studio/` Studio UI (Vue 3)
 - `.env` runtime configuration
+- `docs/ws-protocol.md` WebSocket protocol for client push mode
 
 ## Useful Commands
 - Run the agent loop (observe -> decide -> act):
@@ -46,6 +48,12 @@ fallbacks if `LLM_*` is unset.
 
 ## MRPA Studio UI
 - Start MRPA API: `python -m uvicorn apps.mrpa.server:app --reload --port 8020`
+- Optional device-side service (run near devices):
+  - `python -m uvicorn apps.client.server:app --reload --port 8021`
+  - Pull mode (MRPA calls client HTTP): set `MRPA_CLIENT_MODE=pull` and `MRPA_CLIENT_URL=http://127.0.0.1:8021`
+  - Push mode (client registers via WebSocket): set `MRPA_CLIENT_MODE=push` on MRPA and `CLIENT_MRPA_WS=ws://127.0.0.1:8020/ws/client` on the client
+  - Optional shared token: set `MRPA_CLIENT_TOKEN` and `CLIENT_TOKEN`
+  - Presence timeouts: `MRPA_CLIENT_INACTIVE_SEC` (mark offline) and `MRPA_CLIENT_EVICT_SEC` (remove)
 - Build + serve UI from backend (prod):
   - `cd apps/studio && npm install && npm run build`
   - Set `MRPA_SERVE_STUDIO=true`
@@ -59,6 +67,7 @@ fallbacks if `LLM_*` is unset.
 - Live stream uses `adb` + `ffmpeg`. Optional env: `MRPA_STREAM_FPS`, `MRPA_STREAM_SCALE`, `MRPA_STREAM_BITRATE`.
 - For 30fps on devices without `screenrecord --output-format`, use scrcpy (auto-detected from `tools/scrcpy`).
 - Override stream driver with `MRPA_STREAM_DRIVER=scrcpy|screenrecord|screencap`.
+- WebRTC uses ICE servers from `MRPA_WEBRTC_ICE`. In push mode, set the same ICE list on the device client.
 
 ## Cloud OCR Service
 The agent uses the cloud OCR service by default. Configure the

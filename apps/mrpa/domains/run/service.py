@@ -439,6 +439,7 @@ def _list_steps(run_dir: Path) -> List[Dict[str, object]]:
 def _step_payload(run_id: str, step_id: str, step_dir: Path) -> Dict[str, object]:
     return {
         "run_id": run_id,
+        "id": step_id,
         "step_id": step_id,
         "decision": _read_json(step_dir / "decision.json"),
         "prompt": _read_text(step_dir / "prompt.txt"),

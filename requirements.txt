@@ -5,6 +5,7 @@ av
 fastapi
 numpy
 uvicorn
+websockets
 opencv-python
 jsonschema
 pydantic-settings
