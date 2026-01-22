@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 from typing import Any, Awaitable, Callable, Optional
@@ -40,7 +41,9 @@ class JsonWsClient:
         stop_event = stop_event or self._stop_event
         while not stop_event.is_set():
             try:
-                await self._connect_once(on_connect, on_message, on_disconnect)
+                await self._connect_once(
+                    on_connect, on_message, on_disconnect, stop_event=stop_event
+                )
             except Exception:
                 if stop_event.is_set():
                     break
@@ -52,9 +55,20 @@ class JsonWsClient:
 
     async def stop(self) -> None:
         self._stop_event.set()
-        async with self._lock:
-            if self._ws is not None:
-                await self._ws.close()
+        ws = None
+        try:
+            await asyncio.wait_for(self._lock.acquire(), timeout=1)
+            ws = self._ws
+        except asyncio.TimeoutError:
+            ws = self._ws
+        finally:
+            if self._lock.locked():
+                self._lock.release()
+        if ws is not None:
+            try:
+                await asyncio.wait_for(ws.close(), timeout=2)
+            except Exception:
+                pass
 
     async def send(self, payload: dict) -> None:
         async with self._lock:
@@ -68,6 +82,8 @@ class JsonWsClient:
         on_connect: Optional[AsyncCallback],
         on_message: JsonHandler,
         on_disconnect: Optional[AsyncCallback],
+        *,
+        stop_event: asyncio.Event,
     ) -> None:
         aiohttp = _load_aiohttp()
         ws_url = self._url
@@ -75,16 +91,41 @@ class JsonWsClient:
             joiner = "&" if "?" in ws_url else "?"
             ws_url = "{}{}token={}".format(ws_url, joiner, self._token)
         async with aiohttp.ClientSession() as session:
-            async with session.ws_connect(
-                ws_url, heartbeat=self._heartbeat
-            ) as ws:
+            stop_task = asyncio.create_task(stop_event.wait())
+            connect_task = asyncio.create_task(
+                session.ws_connect(ws_url, heartbeat=self._heartbeat)
+            )
+            done, pending = await asyncio.wait(
+                {connect_task, stop_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done:
+                connect_task.cancel()
+                with contextlib.suppress(Exception):
+                    await connect_task
+                return
+            ws = connect_task.result()
+            async with ws:
                 async with self._lock:
                     self._ws = ws
                 self._log("connect", {"url": ws_url})
                 if on_connect:
                     await on_connect()
                 try:
-                    async for msg in ws:
+                    while True:
+                        if stop_event.is_set():
+                            await ws.close()
+                            break
+                        recv_task = asyncio.create_task(ws.receive())
+                        done, pending = await asyncio.wait(
+                            {recv_task, stop_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if stop_task in done:
+                            recv_task.cancel()
+                            await ws.close()
+                            break
+                        msg = recv_task.result()
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             payload = _parse_json(msg.data)
                             if payload is not None:
@@ -96,6 +137,7 @@ class JsonWsClient:
                         ):
                             break
                 finally:
+                    stop_task.cancel()
                     async with self._lock:
                         self._ws = None
                     self._log("disconnect", {"url": ws_url})

@@ -1,16 +1,28 @@
+import asyncio
+import contextlib
+import threading
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from mrpa.domains.device import DeviceCommand, DeviceSessionManager
+from infra.scrcpy import ScrcpyControlConfig
 from mrpa.domains.stream import (
     list_devices as list_adb_devices,
     mjpeg_stream,
-    shutdown as shutdown_stream,
+    set_scrcpy_session_manager,
+    shutdown_async as shutdown_stream,
     validate_device_id,
     webrtc_config as get_webrtc_config,
     webrtc_offer as create_webrtc_offer,
 )
 from mrpa.domains.stream import service as stream_service
+from mrpa.domains.stream.scrcpy_sessions import (
+    ScrcpySessionConfig,
+    ScrcpySessionManager,
+    ScrcpySessionStatus,
+)
 from mrpa.settings import ServerSettings
 
 from .schemas import (
@@ -20,6 +32,8 @@ from .schemas import (
     DeviceQueueClearResponse,
     DeviceSessionCloseResponse,
     DeviceSessionStatus,
+    ScrcpySessionConfigRequest,
+    ScrcpySessionStatusResponse,
     WebRTCAnswer,
     WebRTCConfigResponse,
     WebRTCOffer,
@@ -28,16 +42,56 @@ from .schemas import (
 router = APIRouter()
 
 SETTINGS = ServerSettings()
+scrcpy_config = None
+if (SETTINGS.input_driver or "adb") == "scrcpy":
+    scrcpy_config = ScrcpyControlConfig(
+        adb_path=stream_service.ADB_PATH,
+        server_path=stream_service.SCRCPY_SERVER_PATH,
+        server_version=SETTINGS.scrcpy_server_version,
+        log_level=SETTINGS.scrcpy_log_level,
+        port=SETTINGS.scrcpy_control_port,
+        connect_timeout=SETTINGS.scrcpy_connect_timeout,
+        start_delay_ms=SETTINGS.scrcpy_start_delay_ms,
+    )
 device_manager = DeviceSessionManager(
     adb_path=stream_service.ADB_PATH,
     ime_id=SETTINGS.adb_ime_id,
     restore_ime=SETTINGS.adb_ime_restore,
+    input_driver=SETTINGS.input_driver or "adb",
+    scrcpy_config=scrcpy_config,
+    input_allow_fallback=SETTINGS.input_allow_fallback,
 )
+scrcpy_sessions = ScrcpySessionManager()
+set_scrcpy_session_manager(scrcpy_sessions)
 
 
 async def shutdown_event() -> None:
-    shutdown_stream()
-    device_manager.shutdown()
+    with contextlib.suppress(Exception):
+        asyncio.create_task(shutdown_stream())
+    threading.Thread(target=device_manager.shutdown, daemon=True).start()
+    threading.Thread(target=scrcpy_sessions.stop_all, daemon=True).start()
+
+
+def _merge_scrcpy_config(
+    device_id: str, payload: Optional[ScrcpySessionConfigRequest]
+) -> ScrcpySessionConfig:
+    base = scrcpy_sessions.get_config(device_id)
+    data = base.as_dict()
+    if payload:
+        updates = payload.model_dump(exclude_none=True)
+        data.update(updates)
+    return ScrcpySessionConfig(**data)
+
+
+def _status_for_device(device_id: str) -> ScrcpySessionStatus:
+    session = scrcpy_sessions.get_session(device_id)
+    if session:
+        return session.status()
+    return ScrcpySessionStatus(
+        device_id=device_id,
+        status="stopped",
+        config=scrcpy_sessions.get_config(device_id),
+    )
 
 
 @router.get("/api/devices", response_model=list[DeviceInfo])
@@ -57,6 +111,77 @@ def get_device_session(device_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="device session not found")
     return session.status_dict()
+
+
+@router.get(
+    "/api/stream/sessions",
+    response_model=list[ScrcpySessionStatusResponse],
+)
+def list_stream_sessions():
+    return [status.as_dict() for status in scrcpy_sessions.list_sessions()]
+
+
+@router.get(
+    "/api/stream/{device_id}/session",
+    response_model=ScrcpySessionStatusResponse,
+)
+def get_stream_session(device_id: str):
+    device_id = validate_device_id(device_id)
+    return _status_for_device(device_id).as_dict()
+
+
+@router.post(
+    "/api/stream/{device_id}/start",
+    response_model=ScrcpySessionStatusResponse,
+)
+def start_stream_session(
+    device_id: str, payload: Optional[ScrcpySessionConfigRequest] = None
+):
+    device_id = validate_device_id(device_id)
+    config = _merge_scrcpy_config(device_id, payload)
+    status = scrcpy_sessions.start(device_id, config)
+    return status.as_dict()
+
+
+@router.post(
+    "/api/stream/{device_id}/restart",
+    response_model=ScrcpySessionStatusResponse,
+)
+def restart_stream_session(
+    device_id: str, payload: Optional[ScrcpySessionConfigRequest] = None
+):
+    device_id = validate_device_id(device_id)
+    config = _merge_scrcpy_config(device_id, payload)
+    status = scrcpy_sessions.restart(device_id, config)
+    return status.as_dict()
+
+
+@router.post(
+    "/api/stream/{device_id}/stop",
+    response_model=ScrcpySessionStatusResponse,
+)
+def stop_stream_session(device_id: str):
+    device_id = validate_device_id(device_id)
+    status = scrcpy_sessions.stop(device_id)
+    return status.as_dict()
+
+
+@router.post(
+    "/api/stream/{device_id}/config",
+    response_model=ScrcpySessionStatusResponse,
+)
+def update_stream_config(
+    device_id: str, payload: ScrcpySessionConfigRequest
+):
+    device_id = validate_device_id(device_id)
+    config = _merge_scrcpy_config(device_id, payload)
+    session = scrcpy_sessions.get_session(device_id)
+    if session:
+        status = session.status()
+        if status.status in ("running", "starting"):
+            return scrcpy_sessions.restart(device_id, config).as_dict()
+    scrcpy_sessions.set_config(device_id, config)
+    return _status_for_device(device_id).as_dict()
 
 
 @router.post(
@@ -113,10 +238,18 @@ def stream_device(device_id: str):
 
 @router.get("/api/webrtc/config", response_model=WebRTCConfigResponse)
 def webrtc_config():
-    return get_webrtc_config()
+    config = dict(get_webrtc_config() or {})
+    config["client_mode"] = "client"
+    config["mjpeg_available"] = True
+    config["input_driver"] = SETTINGS.input_driver or "adb"
+    config["input_allow_fallback"] = SETTINGS.input_allow_fallback
+    return config
 
 
 @router.post("/api/webrtc/offer", response_model=WebRTCAnswer)
 async def webrtc_offer(payload: WebRTCOffer):
+    asyncio.create_task(
+        asyncio.to_thread(device_manager.warmup_control, payload.device_id)
+    )
     answer = await create_webrtc_offer(payload)
     return {"sdp": answer.sdp, "type": answer.type}

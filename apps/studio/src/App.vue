@@ -92,11 +92,10 @@
           :liveMessages="liveMessages"
           :liveStats="liveStats"
           :selectedDeviceId="controlDeviceId"
+          :inputAvailable="inputAvailableByDevice"
           @refresh="refreshDevices"
           @toggle="toggleLiveStream"
           @command="handleDeviceCommand"
-          @tap="handleLiveTap"
-          @swipe="handleLiveSwipe"
           @select="handleLiveSelect"
         />
       </div>
@@ -231,10 +230,17 @@
               :statusMessage="controlStatusMessage"
               :streamActive="controlStreamActive"
               :streamMode="controlStreamMode"
+              :streamSession="controlStreamSession"
+              :mjpegAvailable="mjpegAvailable"
+              :inputEnabled="controlInputEnabled"
               @command="handleDeviceCommand"
               @stream-toggle="toggleLiveStream"
               @stream-mjpeg="useMjpegStream"
               @stream-webrtc="retryWebRTCStream"
+              @stream-session-start="handleStreamSessionStart"
+              @stream-session-stop="handleStreamSessionStop"
+              @stream-session-restart="handleStreamSessionRestart"
+              @stream-session-config="handleStreamSessionConfig"
             />
           </div>
           <div v-show="stageConsoleTab === 'session'" class="stage-console-pane">
@@ -487,7 +493,12 @@ import { useAppStore } from "./store/app";
 import { useDevicesStore } from "./store/devices";
 import { useRunsStore } from "./store/runs";
 import { useStreamsStore } from "./store/streams";
-import type { DeviceCommandRequest, RunRequest, StepDetails } from "./api/types";
+import type {
+  DeviceCommandRequest,
+  RunRequest,
+  StepDetails,
+  StreamSessionConfigRequest,
+} from "./api/types";
 
 const app = useAppStore();
 const runsStore = useRunsStore();
@@ -508,7 +519,14 @@ const {
   logStatus,
 } = storeToRefs(runsStore);
 const { devices, deviceSessions } = storeToRefs(devicesStore);
-const { liveConnections, liveMessages, liveStats } = storeToRefs(streamsStore);
+const {
+  liveConnections,
+  liveMessages,
+  liveStats,
+  streamSessions,
+  mjpegAvailable,
+  webrtcConfig,
+} = storeToRefs(streamsStore);
 
 const form = reactive({
   goal: "",
@@ -849,6 +867,9 @@ function getDeviceSessionStatus(deviceId: string) {
   if (!deviceId) {
     return t("session.selectDevice");
   }
+  if (isClientOffline(deviceId)) {
+    return t("session.offline");
+  }
   const session = deviceSessions.value.find(
     (item) => item.device_id === deviceId,
   );
@@ -865,6 +886,12 @@ function getDeviceSessionStatus(deviceId: string) {
     return t("session.queuedPending", { pending: session.pending });
   }
   return t("session.idle");
+}
+
+function isClientOffline(deviceId: string) {
+  const device = devices.value.find((item) => item.id === deviceId);
+  const status = (device?.client_status || "unknown").toString().toLowerCase();
+  return status === "offline";
 }
 
 async function handleRunSubmit() {
@@ -939,6 +966,9 @@ async function refreshDevices() {
   try {
     await devicesStore.refreshDevices();
     streamsStore.syncDevices(devices.value);
+    if (controlDeviceId.value) {
+      void streamsStore.refreshStreamSession(controlDeviceId.value);
+    }
   } catch (error) {
     app.setError(error);
   }
@@ -996,41 +1026,49 @@ async function handleDeviceCommand(
   payload: DeviceCommandRequest,
 ) {
   try {
+    if (payload.type.startsWith("touch_")) {
+      void devicesStore.sendDeviceCommand(deviceId, payload);
+      return;
+    }
     await devicesStore.sendDeviceCommand(deviceId, payload);
-    await devicesStore.refreshDeviceCommands(deviceId, 10);
+    if (!payload.type.startsWith("touch_")) {
+      await devicesStore.refreshDeviceCommands(deviceId, 10);
+    }
   } catch (error) {
     app.setError(error);
   }
 }
 
-async function handleLiveTap(
-  deviceId: string,
-  payload: { x: number; y: number },
-) {
+async function handleStreamSessionStart(deviceId: string) {
   try {
-    await devicesStore.sendDeviceCommand(deviceId, {
-      type: "tap",
-      x: payload.x,
-      y: payload.y,
-    });
+    await streamsStore.startStreamSession(deviceId);
   } catch (error) {
     app.setError(error);
   }
 }
 
-async function handleLiveSwipe(
+async function handleStreamSessionStop(deviceId: string) {
+  try {
+    await streamsStore.stopStreamSession(deviceId);
+  } catch (error) {
+    app.setError(error);
+  }
+}
+
+async function handleStreamSessionRestart(deviceId: string) {
+  try {
+    await streamsStore.restartStreamSession(deviceId);
+  } catch (error) {
+    app.setError(error);
+  }
+}
+
+async function handleStreamSessionConfig(
   deviceId: string,
-  payload: { x1: number; y1: number; x2: number; y2: number; duration_ms: number },
+  config: StreamSessionConfigRequest,
 ) {
   try {
-    await devicesStore.sendDeviceCommand(deviceId, {
-      type: "swipe",
-      x1: payload.x1,
-      y1: payload.y1,
-      x2: payload.x2,
-      y2: payload.y2,
-      duration_ms: payload.duration_ms,
-    });
+    await streamsStore.updateStreamSessionConfig(deviceId, config);
   } catch (error) {
     app.setError(error);
   }
@@ -1053,10 +1091,73 @@ const controlStreamConnection = computed(() => {
   }
   return liveConnections.value[controlDeviceId.value] || null;
 });
-const controlStreamActive = computed(() => Boolean(controlStreamConnection.value));
-const controlStreamMode = computed(() =>
-  controlStreamConnection.value ? controlStreamConnection.value.mode : null,
+const controlStreamActive = computed(() => {
+  if (controlDeviceId.value && isClientOffline(controlDeviceId.value)) {
+    return false;
+  }
+  return Boolean(controlStreamConnection.value);
+});
+const controlStreamMode = computed(() => {
+  if (controlDeviceId.value && isClientOffline(controlDeviceId.value)) {
+    return null;
+  }
+  return controlStreamConnection.value ? controlStreamConnection.value.mode : null;
+});
+const controlStreamSession = computed(() => {
+  if (!controlDeviceId.value) {
+    return null;
+  }
+  return streamSessions.value[controlDeviceId.value] || null;
+});
+const inputDriver = computed(() =>
+  (webrtcConfig.value?.input_driver || "").toLowerCase(),
 );
+const inputAllowFallback = computed(() => {
+  if (typeof webrtcConfig.value?.input_allow_fallback === "boolean") {
+    return webrtcConfig.value.input_allow_fallback;
+  }
+  return true;
+});
+const requiresScrcpyControl = computed(
+  () => inputDriver.value === "scrcpy" && !inputAllowFallback.value,
+);
+
+function scrcpyControlReady(deviceId: string) {
+  const session = streamSessions.value[deviceId];
+  if (!session) {
+    return false;
+  }
+  const status = (session.status || "stopped").toLowerCase();
+  return status === "running" && Boolean(session.config?.control);
+}
+
+const inputAvailableByDevice = computed<Record<string, boolean>>(() => {
+  if (!requiresScrcpyControl.value) {
+    return {};
+  }
+  const availability: Record<string, boolean> = {};
+  devices.value.forEach((device) => {
+    if (isClientOffline(device.id)) {
+      availability[device.id] = false;
+      return;
+    }
+    availability[device.id] = scrcpyControlReady(device.id);
+  });
+  return availability;
+});
+
+const controlInputEnabled = computed(() => {
+  if (!requiresScrcpyControl.value) {
+    return true;
+  }
+  if (!controlDeviceId.value) {
+    return false;
+  }
+  if (isClientOffline(controlDeviceId.value)) {
+    return false;
+  }
+  return scrcpyControlReady(controlDeviceId.value);
+});
 
 const decisionText = computed(() => formatJson(currentStep.value?.decision));
 const promptText = computed(() => currentStep.value?.prompt || t("common.noData"));
@@ -1192,6 +1293,7 @@ onMounted(() => {
   (window as unknown as { __webrtcConnections?: unknown }).__webrtcConnections =
     streamsStore.liveConnections;
   setLocale(locale.value as Locale);
+  streamsStore.ensureWebRTCConfig().catch(() => {});
   const storedWidth = window.localStorage.getItem("mrpa.railWidth");
   if (storedWidth) {
     const parsed = Number.parseInt(storedWidth, 10);
@@ -1223,6 +1325,16 @@ watch(
   (next) => {
     if (!controlDeviceId.value && next.length) {
       controlDeviceId.value = next[0].id;
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  controlDeviceId,
+  (next) => {
+    if (next) {
+      void streamsStore.refreshStreamSession(next);
     }
   },
   { immediate: true },

@@ -1,11 +1,14 @@
-﻿import asyncio
+import asyncio
+import contextlib
 import json
 import time
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
 
 from infra.ws import JsonWsServer
+from infra.scrcpy import ScrcpyControlConfig
 from ..constants import OUTPUTS_DIR
 from ..domains.client import ClientApi, ClientRegistry
 from ..domains.device import DeviceCommand, DeviceSessionManager
@@ -13,12 +16,16 @@ from ..domains.run import RunService
 from ..domains.stream import (
     list_devices as list_adb_devices,
     mjpeg_stream,
-    shutdown as shutdown_stream,
+    shutdown_async as shutdown_stream_async,
     validate_device_id,
     webrtc_config as get_webrtc_config,
     webrtc_offer as create_webrtc_offer,
 )
 from ..domains.stream import service as stream_service
+from ..domains.stream.scrcpy_sessions import (
+    ScrcpySessionConfig,
+    ScrcpySessionStatus,
+)
 from ..settings import ServerSettings
 from .schemas import (
     DeviceCommandRequest,
@@ -32,6 +39,8 @@ from .schemas import (
     RunRequest,
     RunStepDetail,
     RunStopResponse,
+    ScrcpySessionConfigRequest,
+    ScrcpySessionStatusResponse,
     WebRTCAnswer,
     WebRTCConfigResponse,
     WebRTCOffer,
@@ -59,10 +68,24 @@ if CLIENT_MODE == "pull":
 elif CLIENT_MODE == "push":
     client_registry = ClientRegistry()
 else:
+    scrcpy_config = None
+    if (SETTINGS.input_driver or "adb") == "scrcpy":
+        scrcpy_config = ScrcpyControlConfig(
+            adb_path=stream_service.ADB_PATH,
+            server_path=stream_service.SCRCPY_SERVER_PATH,
+            server_version=SETTINGS.scrcpy_server_version,
+            log_level=SETTINGS.scrcpy_log_level,
+            port=SETTINGS.scrcpy_control_port,
+            connect_timeout=SETTINGS.scrcpy_connect_timeout,
+            start_delay_ms=SETTINGS.scrcpy_start_delay_ms,
+        )
     device_manager = DeviceSessionManager(
         adb_path=stream_service.ADB_PATH,
         ime_id=SETTINGS.adb_ime_id,
         restore_ime=SETTINGS.adb_ime_restore,
+        input_driver=SETTINGS.input_driver or "adb",
+        scrcpy_config=scrcpy_config,
+        input_allow_fallback=SETTINGS.input_allow_fallback,
     )
 
 
@@ -73,9 +96,49 @@ async def shutdown_event() -> None:
         _sweeper_task = None
     if client_api or client_registry:
         return
-    shutdown_stream()
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(shutdown_stream_async(), timeout=2)
     if device_manager:
-        device_manager.shutdown()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(
+                asyncio.to_thread(device_manager.shutdown), timeout=2
+            )
+
+
+def _local_scrcpy_manager():
+    return stream_service._get_scrcpy_session_manager()
+
+
+def _merge_scrcpy_config(
+    device_id: str, payload: Optional[ScrcpySessionConfigRequest]
+) -> ScrcpySessionConfig:
+    manager = _local_scrcpy_manager()
+    if not manager:
+        return ScrcpySessionConfig()
+    base = manager.get_config(device_id)
+    data = base.as_dict()
+    if payload:
+        updates = payload.model_dump(exclude_none=True)
+        data.update(updates)
+    return ScrcpySessionConfig(**data)
+
+
+def _status_for_device(device_id: str) -> ScrcpySessionStatus:
+    manager = _local_scrcpy_manager()
+    if not manager:
+        return ScrcpySessionStatus(
+            device_id=device_id,
+            status="stopped",
+            config=ScrcpySessionConfig(),
+        )
+    session = manager.get_session(device_id)
+    if session:
+        return session.status()
+    return ScrcpySessionStatus(
+        device_id=device_id,
+        status="stopped",
+        config=manager.get_config(device_id),
+    )
 
 
 @router.get("/api/runs", response_model=list[RunMeta])
@@ -105,6 +168,23 @@ def list_device_sessions():
     return device_manager.list_sessions()
 
 
+@router.get(
+    "/api/stream/sessions",
+    response_model=list[ScrcpySessionStatusResponse],
+)
+def list_stream_sessions():
+    if client_api:
+        return client_api.list_stream_sessions()
+    if client_registry:
+        return client_registry.list_stream_sessions(
+            inactive_after=SETTINGS.client_inactive_seconds
+        )
+    manager = _local_scrcpy_manager()
+    if not manager:
+        return []
+    return [status.as_dict() for status in manager.list_sessions()]
+
+
 @router.get("/api/device/{device_id}/session", response_model=DeviceSessionStatus)
 def get_device_session(device_id: str):
     device_id = validate_device_id(device_id)
@@ -121,6 +201,155 @@ def get_device_session(device_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="device session not found")
     return session.status_dict()
+
+
+@router.get(
+    "/api/stream/{device_id}/session",
+    response_model=ScrcpySessionStatusResponse,
+)
+def get_stream_session(device_id: str):
+    device_id = validate_device_id(device_id)
+    if client_api:
+        return client_api.get_stream_session(device_id)
+    if client_registry:
+        session = client_registry.get_stream_session(
+            device_id, inactive_after=SETTINGS.client_inactive_seconds
+        )
+        if not session:
+            raise HTTPException(status_code=404, detail="stream session not found")
+        return session
+    manager = _local_scrcpy_manager()
+    if not manager:
+        raise HTTPException(status_code=501, detail="stream sessions not available")
+    return _status_for_device(device_id).as_dict()
+
+
+@router.post(
+    "/api/stream/{device_id}/start",
+    response_model=ScrcpySessionStatusResponse,
+)
+async def start_stream_session(
+    device_id: str, payload: Optional[ScrcpySessionConfigRequest] = None
+):
+    device_id = validate_device_id(device_id)
+    if client_api:
+        return client_api.start_stream_session(
+            device_id, payload.model_dump(exclude_none=True) if payload else None
+        )
+    if client_registry:
+        result = await client_registry.request_device(
+            device_id,
+            {
+                "type": "stream_session_start",
+                "device_id": device_id,
+                "config": payload.model_dump(exclude_none=True) if payload else None,
+            },
+            timeout=SETTINGS.client_timeout,
+        )
+        if result.get("error"):
+            raise HTTPException(status_code=502, detail=result.get("error"))
+        return result.get("session") or result
+    manager = _local_scrcpy_manager()
+    if not manager:
+        raise HTTPException(status_code=501, detail="stream sessions not available")
+    config = _merge_scrcpy_config(device_id, payload)
+    status = manager.start(device_id, config)
+    return status.as_dict()
+
+
+@router.post(
+    "/api/stream/{device_id}/restart",
+    response_model=ScrcpySessionStatusResponse,
+)
+async def restart_stream_session(
+    device_id: str, payload: Optional[ScrcpySessionConfigRequest] = None
+):
+    device_id = validate_device_id(device_id)
+    if client_api:
+        return client_api.restart_stream_session(
+            device_id, payload.model_dump(exclude_none=True) if payload else None
+        )
+    if client_registry:
+        result = await client_registry.request_device(
+            device_id,
+            {
+                "type": "stream_session_restart",
+                "device_id": device_id,
+                "config": payload.model_dump(exclude_none=True) if payload else None,
+            },
+            timeout=SETTINGS.client_timeout,
+        )
+        if result.get("error"):
+            raise HTTPException(status_code=502, detail=result.get("error"))
+        return result.get("session") or result
+    manager = _local_scrcpy_manager()
+    if not manager:
+        raise HTTPException(status_code=501, detail="stream sessions not available")
+    config = _merge_scrcpy_config(device_id, payload)
+    status = manager.restart(device_id, config)
+    return status.as_dict()
+
+
+@router.post(
+    "/api/stream/{device_id}/stop",
+    response_model=ScrcpySessionStatusResponse,
+)
+async def stop_stream_session(device_id: str):
+    device_id = validate_device_id(device_id)
+    if client_api:
+        return client_api.stop_stream_session(device_id)
+    if client_registry:
+        result = await client_registry.request_device(
+            device_id,
+            {"type": "stream_session_stop", "device_id": device_id},
+            timeout=SETTINGS.client_timeout,
+        )
+        if result.get("error"):
+            raise HTTPException(status_code=502, detail=result.get("error"))
+        return result.get("session") or result
+    manager = _local_scrcpy_manager()
+    if not manager:
+        raise HTTPException(status_code=501, detail="stream sessions not available")
+    status = manager.stop(device_id)
+    return status.as_dict()
+
+
+@router.post(
+    "/api/stream/{device_id}/config",
+    response_model=ScrcpySessionStatusResponse,
+)
+async def update_stream_session_config(
+    device_id: str, payload: ScrcpySessionConfigRequest
+):
+    device_id = validate_device_id(device_id)
+    if client_api:
+        return client_api.update_stream_session_config(
+            device_id, payload.model_dump(exclude_none=True)
+        )
+    if client_registry:
+        result = await client_registry.request_device(
+            device_id,
+            {
+                "type": "stream_session_config",
+                "device_id": device_id,
+                "config": payload.model_dump(exclude_none=True),
+            },
+            timeout=SETTINGS.client_timeout,
+        )
+        if result.get("error"):
+            raise HTTPException(status_code=502, detail=result.get("error"))
+        return result.get("session") or result
+    manager = _local_scrcpy_manager()
+    if not manager:
+        raise HTTPException(status_code=501, detail="stream sessions not available")
+    config = _merge_scrcpy_config(device_id, payload)
+    session = manager.get_session(device_id)
+    if session:
+        status = session.status()
+        if status.status in ("running", "starting"):
+            return manager.restart(device_id, config).as_dict()
+    manager.set_config(device_id, config)
+    return _status_for_device(device_id).as_dict()
 
 
 @router.post(
@@ -229,8 +458,15 @@ def stream_device(device_id: str):
 @router.get("/api/webrtc/config", response_model=WebRTCConfigResponse)
 def webrtc_config():
     if client_api:
-        return client_api.webrtc_config()
-    return get_webrtc_config()
+        payload = client_api.webrtc_config()
+    else:
+        payload = get_webrtc_config()
+    config = dict(payload or {})
+    config["client_mode"] = SETTINGS.client_mode
+    config["mjpeg_available"] = SETTINGS.client_mode != "push"
+    config["input_driver"] = SETTINGS.input_driver or "adb"
+    config["input_allow_fallback"] = SETTINGS.input_allow_fallback
+    return config
 
 
 @router.post("/api/webrtc/offer", response_model=WebRTCAnswer)
@@ -254,6 +490,12 @@ async def webrtc_offer(payload: WebRTCOffer):
             "sdp": response.get("sdp"),
             "type": response.get("sdp_type") or response.get("type"),
         }
+    if device_manager:
+        asyncio.create_task(
+            asyncio.to_thread(
+                device_manager.warmup_control, payload.device_id
+            )
+        )
     answer = await create_webrtc_offer(payload)
     return {"sdp": answer.sdp, "type": answer.type}
 
@@ -276,6 +518,7 @@ async def client_socket(websocket: WebSocket):
                 websocket,
                 data.get("devices") or [],
                 data.get("sessions") or [],
+                data.get("stream_sessions") or [],
             )
             return
         if not client_id:
@@ -291,9 +534,18 @@ async def client_socket(websocket: WebSocket):
                 client_id, data.get("sessions") or []
             )
             return
+        if msg_type == "stream_sessions_update":
+            client_registry.update_stream_sessions(
+                client_id, data.get("stream_sessions") or []
+            )
+            return
         if msg_type == "session_update":
             session = data.get("session") or {}
             client_registry.update_session(client_id, session)
+            return
+        if msg_type == "stream_session_update":
+            session = data.get("session") or {}
+            client_registry.update_stream_session(client_id, session)
             return
         if msg_type == "command_update":
             command = data.get("command") or {}
@@ -305,6 +557,7 @@ async def client_socket(websocket: WebSocket):
             "queue_clear_result",
             "session_close_result",
             "webrtc_answer",
+            "stream_session_result",
         ):
             request_id = data.get("request_id")
             if request_id:

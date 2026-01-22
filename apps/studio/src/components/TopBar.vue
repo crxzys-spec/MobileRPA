@@ -47,7 +47,7 @@
             :value="device.id"
             :disabled="deviceUnavailable(device)"
           >
-            {{ device.status ? `${device.id} (${device.status})` : device.id }}
+            {{ deviceLabel(device) }}
           </option>
         </select>
       </label>
@@ -109,6 +109,30 @@ const emit = defineEmits<{ (e: "submit"): void }>();
 const { t } = useI18n();
 
 function deviceUnavailable(device?: Device | null) {
-  return Boolean(device?.status && device.status !== "device");
+  if (!device) {
+    return false;
+  }
+  if (isClientOffline(device)) {
+    return true;
+  }
+  return Boolean(device.status && device.status !== "device");
+}
+
+function normalizeClientStatus(value?: string) {
+  return (value || "unknown").toString().toLowerCase();
+}
+
+function isClientOffline(device?: Device | null) {
+  return normalizeClientStatus(device?.client_status) === "offline";
+}
+
+function deviceLabel(device: Device) {
+  if (device.status && device.status !== "device") {
+    return `${device.id} (${device.status})`;
+  }
+  if (isClientOffline(device)) {
+    return `${device.id} (${t("status.offline")})`;
+  }
+  return device.id;
 }
 </script>

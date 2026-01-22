@@ -7,6 +7,9 @@ from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional
 
 from infra.adb import AdbClient
+from infra.scrcpy import ScrcpyControlConfig, ScrcpyControlError, ScrcpyControlSession
+from infra.scrcpy.registry import get_control_channel, is_video_active
+from ..act import normalize_keycode
 
 
 CommandPayload = Dict[str, Any]
@@ -44,6 +47,9 @@ class DeviceSession:
         ime_id: Optional[str] = None,
         restore_ime: bool = True,
         history_limit: int = 200,
+        input_driver: str = "adb",
+        scrcpy_config: Optional[ScrcpyControlConfig] = None,
+        input_allow_fallback: bool = True,
     ) -> None:
         self.device_id = device_id
         self._adb = AdbClient(
@@ -61,6 +67,12 @@ class DeviceSession:
         self._last_error: Optional[str] = None
         self._created_at = time.time()
         self._updated_at = self._created_at
+        self._input_driver = (input_driver or "adb").strip().lower()
+        self._scrcpy_config = scrcpy_config
+        self._input_allow_fallback = bool(input_allow_fallback)
+        self._scrcpy_session: Optional[ScrcpyControlSession] = None
+        self._scrcpy_used_logged = False
+        self._scrcpy_fallback_logged = False
         self._worker.start()
 
     def enqueue(self, command: DeviceCommand) -> DeviceCommand:
@@ -100,6 +112,34 @@ class DeviceSession:
     def stop(self) -> None:
         self._stop_event.set()
         self._worker.join(timeout=2)
+        if self._scrcpy_session:
+            self._scrcpy_session.close()
+            self._scrcpy_session = None
+
+    def warmup_control(self) -> None:
+        if self._input_driver != "scrcpy":
+            return
+        if not is_video_active(self.device_id):
+            return
+        if not get_control_channel(self.device_id):
+            return
+        try:
+            session = self._scrcpy_session_or_none()
+        except ScrcpyControlError as exc:
+            self._note_scrcpy_fallback(str(exc))
+            if not self._input_allow_fallback:
+                raise
+            return
+        if not session:
+            return
+        try:
+            session.ensure_connected()
+            self._note_scrcpy_used()
+        except ScrcpyControlError as exc:
+            self._scrcpy_session = None
+            self._note_scrcpy_fallback(str(exc))
+            if not self._input_allow_fallback:
+                raise
 
     def status_dict(self) -> Dict[str, Any]:
         with self._lock:
@@ -147,7 +187,40 @@ class DeviceSession:
         payload = command.payload
         command_type = command.command_type
         if command_type == "tap":
-            self._adb.tap(int(payload["x"]), int(payload["y"]))
+            x = int(payload["x"])
+            y = int(payload["y"])
+            if self._dispatch_scrcpy_tap(x, y, payload):
+                return
+            if self._input_driver == "scrcpy" and not self._input_allow_fallback:
+                raise ScrcpyControlError("scrcpy control unavailable")
+            self._adb.tap(x, y)
+            return
+        if command_type == "touch_down":
+            x = int(payload["x"])
+            y = int(payload["y"])
+            if self._dispatch_scrcpy_touch("down", x, y, payload):
+                return
+            if self._input_driver == "scrcpy" and not self._input_allow_fallback:
+                raise ScrcpyControlError("scrcpy control unavailable")
+            self._adb.touch_down(x, y)
+            return
+        if command_type == "touch_move":
+            x = int(payload["x"])
+            y = int(payload["y"])
+            if self._dispatch_scrcpy_touch("move", x, y, payload):
+                return
+            if self._input_driver == "scrcpy" and not self._input_allow_fallback:
+                raise ScrcpyControlError("scrcpy control unavailable")
+            self._adb.touch_move(x, y)
+            return
+        if command_type == "touch_up":
+            x = int(payload["x"])
+            y = int(payload["y"])
+            if self._dispatch_scrcpy_touch("up", x, y, payload):
+                return
+            if self._input_driver == "scrcpy" and not self._input_allow_fallback:
+                raise ScrcpyControlError("scrcpy control unavailable")
+            self._adb.touch_up(x, y)
             return
         if command_type == "swipe":
             self._adb.swipe(
@@ -159,10 +232,27 @@ class DeviceSession:
             )
             return
         if command_type == "keyevent":
-            self._adb.keyevent(payload["keycode"])
+            keycode = normalize_keycode(payload.get("keycode"))
+            if isinstance(keycode, int):
+                if self._dispatch_scrcpy_keyevent(keycode):
+                    return
+                if self._input_driver == "scrcpy" and not self._input_allow_fallback:
+                    raise ScrcpyControlError("scrcpy control unavailable")
+                self._adb.keyevent(keycode)
+                return
+            if self._input_driver == "scrcpy" and not self._input_allow_fallback:
+                raise ScrcpyControlError(
+                    "scrcpy keyevent requires numeric keycode"
+                )
+            self._adb.keyevent(keycode)
             return
         if command_type == "input_text":
-            self._adb.input_text(str(payload["text"]))
+            text = str(payload["text"])
+            if self._dispatch_scrcpy_text(text):
+                return
+            if self._input_driver == "scrcpy" and not self._input_allow_fallback:
+                raise ScrcpyControlError("scrcpy control unavailable")
+            self._adb.input_text(text)
             return
         if command_type == "start_app":
             package = str(payload["package"])
@@ -170,12 +260,24 @@ class DeviceSession:
             self._adb.start_app(package, activity)
             return
         if command_type == "back":
+            if self._dispatch_scrcpy_keyevent(4):
+                return
+            if self._input_driver == "scrcpy" and not self._input_allow_fallback:
+                raise ScrcpyControlError("scrcpy control unavailable")
             self._adb.keyevent(4)
             return
         if command_type == "home":
+            if self._dispatch_scrcpy_keyevent(3):
+                return
+            if self._input_driver == "scrcpy" and not self._input_allow_fallback:
+                raise ScrcpyControlError("scrcpy control unavailable")
             self._adb.keyevent(3)
             return
         if command_type == "recent":
+            if self._dispatch_scrcpy_keyevent(187):
+                return
+            if self._input_driver == "scrcpy" and not self._input_allow_fallback:
+                raise ScrcpyControlError("scrcpy control unavailable")
             self._adb.keyevent(187)
             return
         if command_type == "wait":
@@ -185,6 +287,173 @@ class DeviceSession:
             return
         raise ValueError("unsupported command: {}".format(command_type))
 
+    def _dispatch_scrcpy_tap(
+        self, x: int, y: int, payload: CommandPayload
+    ) -> bool:
+        try:
+            session = self._scrcpy_session_or_none()
+        except ScrcpyControlError as exc:
+            self._note_scrcpy_fallback(str(exc))
+            if not self._input_allow_fallback:
+                raise
+            return False
+        if not session:
+            return False
+        try:
+            session.touch_down(
+                x,
+                y,
+                payload.get("screen_width"),
+                payload.get("screen_height"),
+            )
+            session.touch_up(
+                x,
+                y,
+                payload.get("screen_width"),
+                payload.get("screen_height"),
+            )
+            self._note_scrcpy_used()
+            return True
+        except ScrcpyControlError as exc:
+            self._scrcpy_session = None
+            self._note_scrcpy_fallback(str(exc))
+            if not self._input_allow_fallback:
+                raise
+            return False
+
+    def _dispatch_scrcpy_touch(
+        self,
+        action: str,
+        x: int,
+        y: int,
+        payload: CommandPayload,
+    ) -> bool:
+        try:
+            session = self._scrcpy_session_or_none()
+        except ScrcpyControlError as exc:
+            self._note_scrcpy_fallback(str(exc))
+            if not self._input_allow_fallback:
+                raise
+            return False
+        if not session:
+            return False
+        try:
+            if action == "down":
+                session.touch_down(
+                    x,
+                    y,
+                    payload.get("screen_width"),
+                    payload.get("screen_height"),
+                )
+                self._note_scrcpy_used()
+                return True
+            if action == "move":
+                session.touch_move(
+                    x,
+                    y,
+                    payload.get("screen_width"),
+                    payload.get("screen_height"),
+                )
+                self._note_scrcpy_used()
+                return True
+            if action == "up":
+                session.touch_up(
+                    x,
+                    y,
+                    payload.get("screen_width"),
+                    payload.get("screen_height"),
+                )
+                self._note_scrcpy_used()
+                return True
+            return False
+        except ScrcpyControlError as exc:
+            self._scrcpy_session = None
+            self._note_scrcpy_fallback(str(exc))
+            if not self._input_allow_fallback:
+                raise
+            return False
+
+    def _dispatch_scrcpy_keyevent(self, keycode: int) -> bool:
+        try:
+            session = self._scrcpy_session_or_none()
+        except ScrcpyControlError as exc:
+            self._note_scrcpy_fallback(str(exc))
+            if not self._input_allow_fallback:
+                raise
+            return False
+        if not session:
+            return False
+        try:
+            session.keyevent(keycode)
+            self._note_scrcpy_used()
+            return True
+        except ScrcpyControlError as exc:
+            self._scrcpy_session = None
+            self._note_scrcpy_fallback(str(exc))
+            if not self._input_allow_fallback:
+                raise
+            return False
+
+    def _dispatch_scrcpy_text(self, text: str) -> bool:
+        try:
+            session = self._scrcpy_session_or_none()
+        except ScrcpyControlError as exc:
+            self._note_scrcpy_fallback(str(exc))
+            if not self._input_allow_fallback:
+                raise
+            return False
+        if not session:
+            return False
+        try:
+            session.inject_text(text)
+            self._note_scrcpy_used()
+            return True
+        except ScrcpyControlError as exc:
+            self._scrcpy_session = None
+            self._note_scrcpy_fallback(str(exc))
+            if not self._input_allow_fallback:
+                raise
+            return False
+
+    def _scrcpy_session_or_none(self) -> Optional[ScrcpyControlSession]:
+        if self._input_driver != "scrcpy":
+            return None
+        if not self._scrcpy_config:
+            if not self._input_allow_fallback:
+                raise ScrcpyControlError("scrcpy config missing")
+            self._note_scrcpy_fallback("scrcpy config missing")
+            return None
+        if self._scrcpy_session is None:
+            self._scrcpy_session = ScrcpyControlSession(
+                self.device_id, self._scrcpy_config
+            )
+        return self._scrcpy_session
+
+    def _note_scrcpy_used(self) -> None:
+        if self._scrcpy_used_logged:
+            return
+        print(
+            "[input] device",
+            self.device_id,
+            "driver=scrcpy",
+            flush=True,
+        )
+        self._scrcpy_used_logged = True
+
+    def _note_scrcpy_fallback(self, reason: str) -> None:
+        if self._scrcpy_fallback_logged:
+            return
+        print(
+            "[input] device",
+            self.device_id,
+            "scrcpy failed:",
+            reason,
+            "fallback=adb",
+            flush=True,
+        )
+        self._scrcpy_fallback_logged = True
+
+
 
 class DeviceSessionManager:
     def __init__(
@@ -193,11 +462,17 @@ class DeviceSessionManager:
         ime_id: Optional[str] = None,
         restore_ime: bool = True,
         history_limit: int = 200,
+        input_driver: str = "adb",
+        scrcpy_config: Optional[ScrcpyControlConfig] = None,
+        input_allow_fallback: bool = True,
     ) -> None:
         self._adb_path = adb_path
         self._ime_id = ime_id
         self._restore_ime = restore_ime
         self._history_limit = history_limit
+        self._input_driver = input_driver
+        self._scrcpy_config = scrcpy_config
+        self._input_allow_fallback = bool(input_allow_fallback)
         self._lock = threading.Lock()
         self._sessions: Dict[str, DeviceSession] = {}
 
@@ -215,6 +490,9 @@ class DeviceSessionManager:
                     ime_id=self._ime_id,
                     restore_ime=self._restore_ime,
                     history_limit=self._history_limit,
+                    input_driver=self._input_driver,
+                    scrcpy_config=self._scrcpy_config,
+                    input_allow_fallback=self._input_allow_fallback,
                 )
                 self._sessions[device_id] = session
             return session
@@ -239,6 +517,10 @@ class DeviceSessionManager:
         if not session:
             return None
         return session.get_command(command_id)
+
+    def warmup_control(self, device_id: str) -> None:
+        session = self.get_or_create(device_id)
+        session.warmup_control()
 
     def clear_queue(self, device_id: str) -> int:
         session = self.get_session(device_id)

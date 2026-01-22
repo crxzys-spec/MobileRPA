@@ -14,6 +14,21 @@ def normalize_keycode(value):
     value = str(value).strip()
     if not value:
         raise AdbError("keyevent missing keycode")
+    keycode_map = {
+        "KEYCODE_POWER": 26,
+        "KEYCODE_VOLUME_UP": 24,
+        "KEYCODE_VOLUME_DOWN": 25,
+        "KEYCODE_BACK": 4,
+        "KEYCODE_HOME": 3,
+        "KEYCODE_APP_SWITCH": 187,
+        "KEYCODE_MENU": 82,
+        "KEYCODE_ENTER": 66,
+        "KEYCODE_DEL": 67,
+        "KEYCODE_ESCAPE": 111,
+    }
+    mapped = keycode_map.get(value.upper())
+    if mapped is not None:
+        return mapped
     if value.lstrip("-").isdigit():
         try:
             return int(value)

@@ -22,6 +22,7 @@ class ClientState:
     disconnected_at: Optional[float] = None
     devices: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     sessions: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    stream_sessions: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 class ClientRegistry:
@@ -41,6 +42,7 @@ class ClientRegistry:
         websocket: WebSocket,
         devices: Iterable[Dict[str, Any]],
         sessions: Iterable[Dict[str, Any]],
+        stream_sessions: Optional[Iterable[Dict[str, Any]]] = None,
     ) -> None:
         now = time.time()
         devices_map = {
@@ -51,6 +53,11 @@ class ClientRegistry:
         sessions_map = {
             str(item.get("device_id")): dict(item)
             for item in sessions
+            if item.get("device_id")
+        }
+        stream_map = {
+            str(item.get("device_id")): dict(item)
+            for item in (stream_sessions or [])
             if item.get("device_id")
         }
         with self._lock:
@@ -72,6 +79,7 @@ class ClientRegistry:
                 disconnected_at=None,
                 devices=devices_map,
                 sessions=sessions_map,
+                stream_sessions=stream_map,
             )
             self._clients[client_id] = state
             self._rebuild_device_index()
@@ -132,6 +140,23 @@ class ClientRegistry:
             state.connected = True
             state.disconnected_at = None
 
+    def update_stream_sessions(
+        self, client_id: str, sessions: Iterable[Dict[str, Any]]
+    ) -> None:
+        sessions_map = {
+            str(item.get("device_id")): dict(item)
+            for item in sessions
+            if item.get("device_id")
+        }
+        with self._lock:
+            state = self._clients.get(client_id)
+            if not state:
+                return
+            state.stream_sessions = sessions_map
+            state.last_seen = time.time()
+            state.connected = True
+            state.disconnected_at = None
+
     def update_session(self, client_id: str, session: Dict[str, Any]) -> None:
         device_id = session.get("device_id")
         if not device_id:
@@ -141,6 +166,21 @@ class ClientRegistry:
             if not state:
                 return
             state.sessions[str(device_id)] = dict(session)
+            state.last_seen = time.time()
+            state.connected = True
+            state.disconnected_at = None
+
+    def update_stream_session(
+        self, client_id: str, session: Dict[str, Any]
+    ) -> None:
+        device_id = session.get("device_id")
+        if not device_id:
+            return
+        with self._lock:
+            state = self._clients.get(client_id)
+            if not state:
+                return
+            state.stream_sessions[str(device_id)] = dict(session)
             state.last_seen = time.time()
             state.connected = True
             state.disconnected_at = None
@@ -186,6 +226,22 @@ class ClientRegistry:
                     items.append(payload)
             return items
 
+    def list_stream_sessions(
+        self, inactive_after: Optional[float] = None
+    ) -> list[Dict[str, Any]]:
+        now = time.time()
+        with self._lock:
+            items: list[Dict[str, Any]] = []
+            for state in self._clients.values():
+                status = self._client_status(state, now, inactive_after)
+                for session in state.stream_sessions.values():
+                    payload = dict(session)
+                    payload.setdefault("client_id", state.client_id)
+                    payload.setdefault("client_status", status)
+                    payload.setdefault("client_last_seen", state.last_seen)
+                    items.append(payload)
+            return items
+
     def get_session(
         self, device_id: str, inactive_after: Optional[float] = None
     ) -> Optional[Dict[str, Any]]:
@@ -198,6 +254,27 @@ class ClientRegistry:
             if not state:
                 return None
             session = state.sessions.get(device_id)
+            if not session:
+                return None
+            status = self._client_status(state, now, inactive_after)
+            payload = dict(session)
+            payload.setdefault("client_id", client_id)
+            payload.setdefault("client_status", status)
+            payload.setdefault("client_last_seen", state.last_seen)
+            return payload
+
+    def get_stream_session(
+        self, device_id: str, inactive_after: Optional[float] = None
+    ) -> Optional[Dict[str, Any]]:
+        now = time.time()
+        with self._lock:
+            client_id = self._device_index.get(device_id)
+            if not client_id:
+                return None
+            state = self._clients.get(client_id)
+            if not state:
+                return None
+            session = state.stream_sessions.get(device_id)
             if not session:
                 return None
             status = self._client_status(state, now, inactive_after)

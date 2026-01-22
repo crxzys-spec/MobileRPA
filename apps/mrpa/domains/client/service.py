@@ -157,3 +157,45 @@ class ClientApi:
 
     def stream_mjpeg(self, device_id: str) -> Tuple[str, Iterable[bytes]]:
         return self._stream("/api/stream/{}.mjpg".format(device_id))
+
+    def list_stream_sessions(self) -> list[Dict[str, Any]]:
+        return self._request("GET", "/api/stream/sessions") or []
+
+    def get_stream_session(self, device_id: str) -> Dict[str, Any]:
+        return self._request(
+            "GET", "/api/stream/{}/session".format(device_id)
+        )
+
+    def start_stream_session(
+        self, device_id: str, payload: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/stream/{}/start".format(device_id),
+            payload=payload or {},
+        )
+
+    def restart_stream_session(
+        self, device_id: str, payload: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/stream/{}/restart".format(device_id),
+            payload=payload or {},
+        )
+
+    def stop_stream_session(self, device_id: str) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/stream/{}/stop".format(device_id),
+            payload={},
+        )
+
+    def update_stream_session_config(
+        self, device_id: str, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/stream/{}/config".format(device_id),
+            payload=payload,
+        )

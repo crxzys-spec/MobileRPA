@@ -13,6 +13,8 @@ class DeviceCommandRequest(BaseModel):
     type: str = Field(min_length=1)
     x: Optional[int] = None
     y: Optional[int] = None
+    screen_width: Optional[int] = None
+    screen_height: Optional[int] = None
     x1: Optional[int] = None
     y1: Optional[int] = None
     x2: Optional[int] = None
@@ -27,9 +29,9 @@ class DeviceCommandRequest(BaseModel):
     @model_validator(mode="after")
     def _validate(self):
         command_type = self.type
-        if command_type == "tap":
+        if command_type in ("tap", "touch_down", "touch_move", "touch_up"):
             if self.x is None or self.y is None:
-                raise ValueError("tap requires x and y")
+                raise ValueError("{} requires x and y".format(command_type))
             return self
         if command_type == "swipe":
             if None in (self.x1, self.y1, self.x2, self.y2):
@@ -96,8 +98,51 @@ class DeviceSessionCloseResponse(BaseModel):
 
 class WebRTCConfigResponse(BaseModel):
     ice_servers: List[str] = Field(default_factory=list)
+    mjpeg_available: bool = True
+    client_mode: Optional[str] = None
+    input_driver: Optional[str] = None
+    input_allow_fallback: bool = True
 
 
 class WebRTCAnswer(BaseModel):
     sdp: str
     type: str
+
+
+class ScrcpySessionConfigRequest(BaseModel):
+    video: Optional[bool] = None
+    audio: Optional[bool] = None
+    control: Optional[bool] = None
+    max_fps: Optional[int] = None
+    video_bit_rate: Optional[int] = None
+    max_size: Optional[int] = None
+    video_codec_options: Optional[str] = None
+    audio_codec: Optional[str] = None
+    log_level: Optional[str] = None
+
+
+class ScrcpySessionConfig(BaseModel):
+    video: bool
+    audio: bool
+    control: bool
+    max_fps: int
+    video_bit_rate: int
+    max_size: int
+    video_codec_options: str
+    audio_codec: str
+    log_level: str
+
+    model_config = ConfigDict(extra="allow")
+
+
+class ScrcpySessionStatusResponse(BaseModel):
+    device_id: str
+    status: str
+    config: ScrcpySessionConfig
+    started_at: Optional[float] = None
+    updated_at: float
+    last_error: Optional[str] = None
+    port: Optional[int] = None
+    scid: Optional[str] = None
+
+    model_config = ConfigDict(extra="allow")

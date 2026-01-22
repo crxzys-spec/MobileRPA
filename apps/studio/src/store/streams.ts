@@ -1,7 +1,12 @@
 ﻿import { defineStore } from "pinia";
 import { markRaw, reactive, ref } from "vue";
 
-import type { Device, WebrtcConfig } from "../api/types";
+import type {
+  Device,
+  StreamSessionConfigRequest,
+  StreamSessionStatus,
+  WebrtcConfig,
+} from "../api/types";
 import { apiUrl } from "../client/http";
 import {
   applyH264Preference,
@@ -41,6 +46,9 @@ export const useStreamsStore = defineStore("streams", () => {
   const liveConnections = reactive<Record<string, LiveConnection>>({});
   const liveMessages = reactive<Record<string, string>>({});
   const liveStats = reactive<Record<string, LiveStats>>({});
+  const streamSessions = reactive<Record<string, StreamSessionStatus>>({});
+  const mjpegAvailable = ref(true);
+  const streamSessionsAvailable = ref<boolean | null>(null);
   const statsCache = new Map<string, { bytes: number; frames: number; ts: number }>();
   const liveRetryCount = 2;
   const liveRetryDelayMs = 800;
@@ -51,7 +59,30 @@ export const useStreamsStore = defineStore("streams", () => {
       return webrtcConfig.value;
     }
     webrtcConfig.value = await streamsService.getWebRTCConfig();
+    if (typeof webrtcConfig.value.mjpeg_available === "boolean") {
+      mjpegAvailable.value = webrtcConfig.value.mjpeg_available;
+    }
     return webrtcConfig.value;
+  }
+
+  function errorStatus(error: unknown): number | null {
+    if (!error || typeof error !== "object") {
+      return null;
+    }
+    const status = (error as { status?: number }).status;
+    return typeof status === "number" ? status : null;
+  }
+
+  function isNotAvailable(error: unknown): boolean {
+    const status = errorStatus(error);
+    if (status === 501) {
+      return true;
+    }
+    const message =
+      error && typeof error === "object" && "message" in error
+        ? String((error as { message?: string }).message || "")
+        : "";
+    return message.toLowerCase().includes("not available");
   }
 
   function buildMjpegUrl(deviceId: string): string {
@@ -86,7 +117,175 @@ export const useStreamsStore = defineStore("streams", () => {
     }
   }
 
+  function shouldStopForSession(session?: StreamSessionStatus | null) {
+    if (!session) {
+      return false;
+    }
+    const status = (session.status || "stopped").toLowerCase();
+    if (status === "running" || status === "starting") {
+      return session.config?.video === false;
+    }
+    return true;
+  }
+
+  function sessionStopMessage(session?: StreamSessionStatus | null) {
+    if (!session) {
+      return "Stream stopped";
+    }
+    const status = (session.status || "stopped").toLowerCase();
+    if (status === "error") {
+      return "Stream error";
+    }
+    return "Stream stopped";
+  }
+
+  function reconcileLiveWithSession(
+    deviceId: string,
+    session?: StreamSessionStatus | null,
+  ) {
+    if (!liveConnections[deviceId]) {
+      return;
+    }
+    if (!shouldStopForSession(session)) {
+      return;
+    }
+    stopLiveStream(deviceId, sessionStopMessage(session));
+  }
+
+  function getStreamSession(deviceId: string): StreamSessionStatus | null {
+    return streamSessions[deviceId] || null;
+  }
+
+  async function refreshStreamSession(deviceId: string) {
+    app.clearError();
+    try {
+      const session = await streamsService.getStreamSession(deviceId);
+      streamSessions[deviceId] = session;
+      streamSessionsAvailable.value = true;
+      reconcileLiveWithSession(deviceId, session);
+      return session;
+    } catch (error) {
+      if (isNotAvailable(error)) {
+        streamSessionsAvailable.value = false;
+        return null;
+      }
+      app.setError(error);
+      throw error;
+    }
+  }
+
+  async function ensureStreamSessionRunning(deviceId: string) {
+    if (streamSessionsAvailable.value === false) {
+      return;
+    }
+    try {
+      let session = streamSessions[deviceId];
+      if (!session) {
+        try {
+          session = await streamsService.getStreamSession(deviceId);
+          streamSessions[deviceId] = session;
+        } catch (error) {
+          if (isNotAvailable(error)) {
+            streamSessionsAvailable.value = false;
+            return;
+          }
+          session = null;
+        }
+      }
+      streamSessionsAvailable.value = true;
+      const running = session?.status?.toLowerCase() === "running";
+      const videoEnabled = session?.config?.video ?? true;
+      if (running && videoEnabled) {
+        return;
+      }
+      const configOverride = videoEnabled ? undefined : { video: true };
+      const started = running
+        ? await streamsService.restartStreamSession(deviceId, configOverride)
+        : await streamsService.startStreamSession(deviceId, configOverride);
+      streamSessions[deviceId] = started;
+      streamSessionsAvailable.value = true;
+    } catch (error) {
+      if (isNotAvailable(error)) {
+        streamSessionsAvailable.value = false;
+        return;
+      }
+      throw error;
+    }
+  }
+
+  async function startStreamSession(
+    deviceId: string,
+    config?: StreamSessionConfigRequest,
+  ) {
+    app.clearError();
+    try {
+      const session = await streamsService.startStreamSession(deviceId, config);
+      streamSessions[deviceId] = session;
+      streamSessionsAvailable.value = true;
+      reconcileLiveWithSession(deviceId, session);
+      return session;
+    } catch (error) {
+      app.setError(error);
+      throw error;
+    }
+  }
+
+  async function stopStreamSession(deviceId: string) {
+    app.clearError();
+    try {
+      const session = await streamsService.stopStreamSession(deviceId);
+      streamSessions[deviceId] = session;
+      streamSessionsAvailable.value = true;
+      reconcileLiveWithSession(deviceId, session);
+      return session;
+    } catch (error) {
+      app.setError(error);
+      throw error;
+    }
+  }
+
+  async function restartStreamSession(
+    deviceId: string,
+    config?: StreamSessionConfigRequest,
+  ) {
+    app.clearError();
+    try {
+      const session = await streamsService.restartStreamSession(deviceId, config);
+      streamSessions[deviceId] = session;
+      streamSessionsAvailable.value = true;
+      reconcileLiveWithSession(deviceId, session);
+      return session;
+    } catch (error) {
+      app.setError(error);
+      throw error;
+    }
+  }
+
+  async function updateStreamSessionConfig(
+    deviceId: string,
+    config: StreamSessionConfigRequest,
+  ) {
+    app.clearError();
+    try {
+      const session = await streamsService.updateStreamSessionConfig(
+        deviceId,
+        config,
+      );
+      streamSessions[deviceId] = session;
+      streamSessionsAvailable.value = true;
+      reconcileLiveWithSession(deviceId, session);
+      return session;
+    } catch (error) {
+      app.setError(error);
+      throw error;
+    }
+  }
+
   function startMjpegStream(deviceId: string, reason?: string) {
+    if (!mjpegAvailable.value) {
+      stopLiveStream(deviceId, reason || "MJPEG unavailable");
+      return;
+    }
     const connection: LiveConnection = reactive({
       pc: null,
       stream: null,
@@ -104,6 +303,10 @@ export const useStreamsStore = defineStore("streams", () => {
 
   function useMjpegFallback(deviceId: string, reason?: string) {
     if (liveConnections[deviceId]?.mode === "mjpeg") {
+      return;
+    }
+    if (!mjpegAvailable.value) {
+      stopLiveStream(deviceId, reason || "WebRTC failed");
       return;
     }
     stopLiveStream(deviceId);
@@ -182,6 +385,7 @@ export const useStreamsStore = defineStore("streams", () => {
     app.clearError();
     try {
       const config = await ensureWebRTCConfig();
+      await ensureStreamSessionRunning(deviceId);
       const pc = markRaw(
         new RTCPeerConnection({ iceServers: buildIceServers(config) }),
       );
@@ -198,6 +402,7 @@ export const useStreamsStore = defineStore("streams", () => {
       liveMessages[deviceId] = "";
 
       const transceiver = pc.addTransceiver("video", { direction: "recvonly" });
+      pc.addTransceiver("audio", { direction: "recvonly" });
       applyH264Preference(transceiver, deviceId);
 
       pc.ontrack = (event) => {
@@ -205,7 +410,18 @@ export const useStreamsStore = defineStore("streams", () => {
           return;
         }
         const incoming = event.streams && event.streams[0];
-        const stream = incoming || new MediaStream([event.track]);
+        const existing = connection.stream;
+        const stream = existing || incoming || new MediaStream();
+        if (incoming && incoming !== stream) {
+          incoming.getTracks().forEach((track) => {
+            if (!stream.getTracks().some((item) => item.id === track.id)) {
+              stream.addTrack(track);
+            }
+          });
+        }
+        if (!stream.getTracks().some((track) => track.id === event.track.id)) {
+          stream.addTrack(event.track);
+        }
         connection.stream = markRaw(stream);
         connection.status = "Connected";
         startStatsPolling(deviceId, pc);
@@ -319,6 +535,10 @@ export const useStreamsStore = defineStore("streams", () => {
   }
 
   function useMjpegStream(deviceId: string) {
+    if (!mjpegAvailable.value) {
+      liveMessages[deviceId] = "MJPEG unavailable";
+      return;
+    }
     stopLiveStream(deviceId);
     startMjpegStream(deviceId, "Manual MJPEG");
   }
@@ -335,19 +555,30 @@ export const useStreamsStore = defineStore("streams", () => {
         stopLiveStream(deviceId, "Stream stopped");
       }
     });
+    Object.keys(streamSessions).forEach((deviceId) => {
+      if (!deviceIds.has(deviceId)) {
+        delete streamSessions[deviceId];
+      }
+    });
   }
 
   function cleanup() {
     Object.keys(liveConnections).forEach((deviceId) => {
       stopLiveStream(deviceId);
     });
+    Object.keys(streamSessions).forEach((deviceId) => {
+      delete streamSessions[deviceId];
+    });
+    streamSessionsAvailable.value = null;
   }
 
   return {
     webrtcConfig,
+    mjpegAvailable,
     liveConnections,
     liveMessages,
     liveStats,
+    streamSessions,
     stopLiveStream,
     startWebRTCStream,
     toggleLiveStream,
@@ -355,6 +586,12 @@ export const useStreamsStore = defineStore("streams", () => {
     syncDevices,
     useMjpegStream,
     retryWebRTCStream,
+    refreshStreamSession,
+    startStreamSession,
+    stopStreamSession,
+    restartStreamSession,
+    updateStreamSessionConfig,
+    getStreamSession,
     cleanup,
   };
 });

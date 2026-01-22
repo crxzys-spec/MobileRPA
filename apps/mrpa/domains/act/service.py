@@ -1,3 +1,3 @@
-from mrpa.domains.act.strategy import execute_actions, normalize_keycode
+from .strategy import execute_actions, normalize_keycode
 
 __all__ = ["execute_actions", "normalize_keycode"]

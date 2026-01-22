@@ -42,7 +42,13 @@ export async function fetchJson<T>(
       data && typeof data === "object" && "detail" in data
         ? (data as { detail?: string }).detail
         : response.statusText;
-    throw new Error(detail || "Request failed");
+    const error = new Error(detail || "Request failed") as Error & {
+      status?: number;
+      data?: unknown;
+    };
+    error.status = response.status;
+    error.data = data;
+    throw error;
   }
   return data as T;
 }

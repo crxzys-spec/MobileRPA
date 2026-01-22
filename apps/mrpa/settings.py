@@ -10,7 +10,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from infra.llm import LlmConfig
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-ENV_FILES = (ROOT_DIR / ".env", ROOT_DIR / ".env.example")
+# Only load .env at runtime; .env.example is a template.
+ENV_FILES = (ROOT_DIR / ".env",)
 
 
 def _read_env_values() -> dict:
@@ -206,6 +207,16 @@ class ServerSettings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("MRPA_ADB_IME_RESTORE", "ADB_IME_RESTORE"),
     )
+    input_driver: str = Field(
+        default="scrcpy",
+        validation_alias=AliasChoices("MRPA_INPUT_DRIVER", "INPUT_DRIVER"),
+    )
+    input_allow_fallback: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "MRPA_INPUT_ALLOW_FALLBACK", "INPUT_ALLOW_FALLBACK"
+        ),
+    )
     ffmpeg_path: Optional[str] = Field(
         default=None,
         validation_alias=AliasChoices("MRPA_FFMPEG_PATH", "FFMPEG_PATH"),
@@ -301,6 +312,9 @@ class ServerSettings(BaseSettings):
     scrcpy_server_port: int = Field(
         default=27183, validation_alias="MRPA_SCRCPY_PORT"
     )
+    scrcpy_control_port: int = Field(
+        default=0, validation_alias="MRPA_SCRCPY_CONTROL_PORT"
+    )
     scrcpy_connect_timeout: int = Field(
         default=6, validation_alias="MRPA_SCRCPY_TIMEOUT"
     )
@@ -315,6 +329,9 @@ class ServerSettings(BaseSettings):
     )
     scrcpy_video_options: str = Field(
         default="", validation_alias="MRPA_SCRCPY_VIDEO_OPTIONS"
+    )
+    scrcpy_audio_codec: str = Field(
+        default="raw", validation_alias="MRPA_SCRCPY_AUDIO_CODEC"
     )
     scrcpy_log_level: str = Field(
         default="", validation_alias="MRPA_SCRCPY_LOG_LEVEL"
@@ -331,6 +348,7 @@ class ServerSettings(BaseSettings):
         "scrcpy_server_path",
         "scrcpy_server_version",
         "scrcpy_video_options",
+        "scrcpy_audio_codec",
         "webrtc_ice",
         "cors_origins",
         "client_url",
@@ -350,6 +368,7 @@ class ServerSettings(BaseSettings):
         "scrcpy_log_level",
         "forced_h264_profile",
         "client_mode",
+        "input_driver",
         mode="before",
     )
     @classmethod

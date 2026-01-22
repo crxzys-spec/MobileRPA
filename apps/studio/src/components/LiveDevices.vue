@@ -46,7 +46,7 @@
               :title="connectionStateLabel(device.id)"
             ></span>
             <span class="live-overlay-text">{{ device.id }}</span>
-            <span class="live-overlay-sep">•</span>
+            <span class="live-overlay-sep">|</span>
             <span class="live-overlay-text">{{ statsFps(device.id) }}</span>
           </div>
           <div class="live-placeholder" :class="{ hidden: hasStream(device.id) }">
@@ -60,6 +60,12 @@
             playsinline
             :ref="(el) => setVideoRef(device.id, el)"
           ></video>
+          <audio
+            v-if="isWebrtc(device.id)"
+            class="live-audio"
+            autoplay
+            :ref="(el) => setAudioRef(device.id, el)"
+          ></audio>
           <img
             v-else-if="isMjpeg(device.id)"
             class="live-stream"
@@ -71,12 +77,13 @@
             class="live-overlay"
             :class="{ enabled: isControlEnabled(device.id) }"
             @pointerdown="onPointerDown(device.id, $event)"
-            @pointermove="onPointerMove(device.id, $event)"
-            @pointerup="onPointerUp(device.id, $event)"
-            @pointercancel="onPointerCancel(device.id, $event)"
-            @pointerleave="onPointerCancel(device.id, $event)"
-          ></div>
-        </div>
+          @pointermove="onPointerMove(device.id, $event)"
+          @pointerup="onPointerUp(device.id, $event)"
+          @pointercancel="onPointerCancel(device.id, $event)"
+          @pointerleave="onPointerCancel(device.id, $event)"
+          @wheel.prevent="onWheel(device.id, $event)"
+        ></div>
+      </div>
         <div class="live-controls">
           <button
             class="ghost icon-btn"
@@ -133,6 +140,37 @@
           <button
             class="ghost icon-btn"
             type="button"
+            :disabled="!canToggleAudio(device.id)"
+            :aria-label="audioButtonLabel(device.id)"
+            :title="audioButtonLabel(device.id)"
+            :class="{
+              'is-active': isAudioEnabled(device.id),
+              'is-off': !isAudioEnabled(device.id),
+            }"
+            @click="toggleAudio(device.id)"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 9v6h4l5 4V5l-5 4H4z" />
+              <path
+                v-if="isAudioEnabled(device.id)"
+                d="M16 9a3 3 0 0 1 0 6"
+              />
+              <path
+                v-if="isAudioEnabled(device.id)"
+                d="M18.5 7a6 6 0 0 1 0 10"
+              />
+              <line
+                v-else
+                x1="4"
+                y1="4"
+                x2="20"
+                y2="20"
+              />
+            </svg>
+          </button>
+          <button
+            class="ghost icon-btn"
+            type="button"
             :disabled="!canToggleControl(device)"
             :aria-label="controlButtonLabel(device.id)"
             :title="controlButtonLabel(device.id)"
@@ -160,7 +198,7 @@
           <button
             class="ghost icon-btn"
             type="button"
-            :disabled="deviceUnavailable(device)"
+            :disabled="deviceUnavailable(device) || !isInputAvailable(device.id)"
             :aria-label="t('device.back')"
             :title="t('device.back')"
             @click="emitCommand(device.id, 'back')"
@@ -173,7 +211,7 @@
           <button
             class="ghost icon-btn"
             type="button"
-            :disabled="deviceUnavailable(device)"
+            :disabled="deviceUnavailable(device) || !isInputAvailable(device.id)"
             :aria-label="t('device.home')"
             :title="t('device.home')"
             @click="emitCommand(device.id, 'home')"
@@ -186,7 +224,7 @@
           <button
             class="ghost icon-btn"
             type="button"
-            :disabled="deviceUnavailable(device)"
+            :disabled="deviceUnavailable(device) || !isInputAvailable(device.id)"
             :aria-label="t('device.recents')"
             :title="t('device.recents')"
             @click="emitCommand(device.id, 'recent')"
@@ -225,17 +263,14 @@ type LiveStatsView = {
   updatedAt?: number | null;
 };
 
+type ScreenSize = {
+  width: number;
+  height: number;
+};
+
 type TapPayload = {
   x: number;
   y: number;
-};
-
-type SwipePayload = {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-  duration_ms: number;
 };
 
 const props = defineProps<{
@@ -244,14 +279,13 @@ const props = defineProps<{
   liveMessages: Record<string, string>;
   liveStats: Record<string, LiveStatsView>;
   selectedDeviceId?: string | null;
+  inputAvailable?: Record<string, boolean>;
 }>();
 
 const emit = defineEmits<{
   (e: "refresh"): void;
   (e: "toggle", deviceId: string): void;
   (e: "select", deviceId: string): void;
-  (e: "tap", deviceId: string, payload: TapPayload): void;
-  (e: "swipe", deviceId: string, payload: SwipePayload): void;
   (e: "command", deviceId: string, payload: DeviceCommandRequest): void;
 }>();
 
@@ -259,27 +293,69 @@ const { t } = useI18n();
 
 const videoRefs = new Map<string, HTMLVideoElement>();
 const imageRefs = new Map<string, HTMLImageElement>();
+const audioRefs = new Map<string, HTMLAudioElement>();
+const videoStreams = new Map<string, MediaStream>();
+const audioStreams = new Map<string, MediaStream>();
 const attachedStreams = new Set<string>();
 const controlEnabled = reactive<Record<string, boolean>>({});
+const audioEnabled = reactive<Record<string, boolean>>({});
 const overlayHidden = reactive<Record<string, boolean>>({});
 const density = "compact";
 const interactions = reactive<
   Record<
-    string,
-    | {
+      string,
+      | {
         pointerId: number;
         start: TapPayload;
         last: TapPayload;
+        lastSent: TapPayload;
         startTime: number;
+        lastSentTime: number;
         moved: boolean;
+        screen: ScreenSize;
       }
     | undefined
   >
 >({});
 const dragThreshold = 12;
+const dragStartDelay = 40;
+const dragQuickStartDistance = 20;
+const dragEmitInterval = 24;
+const dragMinSegment = 4;
+const wheelEnabled =
+  (import.meta.env?.VITE_WHEEL_SWIPE || "true").toString().toLowerCase() !==
+  "false";
+const wheelScale = 2.6;
+const wheelMinDistance = 6;
+const wheelMaxRatio = 0.6;
+const wheelEmitInterval = 120;
+const wheelDurationMs = 220;
+const wheelState = reactive<
+  Record<
+    string,
+    {
+      lastSent: number;
+      accumX: number;
+      accumY: number;
+      axis: "x" | "y" | null;
+      sign: number;
+      timerId: number | null;
+      point: TapPayload | null;
+      screen: ScreenSize | null;
+    }
+  >
+>({});
 
 function normalizeDeviceStatus(value?: string) {
   return (value || "unknown").toString().toLowerCase();
+}
+
+function normalizeClientStatus(value?: string) {
+  return (value || "unknown").toString().toLowerCase();
+}
+
+function resolveDevice(deviceId: string) {
+  return props.devices.find((device) => device.id === deviceId) || null;
 }
 
 function deviceStatusLabel(value?: string) {
@@ -304,23 +380,86 @@ function deviceStatusClass(value?: string) {
   return "unknown";
 }
 
+function isClientOffline(device?: Device | null) {
+  return normalizeClientStatus(device?.client_status) === "offline";
+}
+
 function deviceUnavailable(device?: Device | null) {
-  return Boolean(device?.status && device.status !== "device");
+  if (!device) {
+    return false;
+  }
+  if (isClientOffline(device)) {
+    return true;
+  }
+  return Boolean(device.status && device.status !== "device");
+}
+
+function isInputAvailable(deviceId: string) {
+  if (!props.inputAvailable) {
+    return true;
+  }
+  const value = props.inputAvailable[deviceId];
+  return value !== false;
 }
 
 function isControlEnabled(deviceId: string) {
-  return Boolean(controlEnabled[deviceId]);
+  const device = resolveDevice(deviceId);
+  if (deviceUnavailable(device)) {
+    return false;
+  }
+  return Boolean(controlEnabled[deviceId]) && isInputAvailable(deviceId);
 }
 
 function canToggleControl(device?: Device | null) {
   if (!device || deviceUnavailable(device)) {
     return false;
   }
-  return isStreaming(device.id);
+  return isStreaming(device.id) && isInputAvailable(device.id);
+}
+
+function hasAudioTrack(deviceId: string) {
+  const stream = props.liveConnections[deviceId]?.stream;
+  return Boolean(stream && stream.getAudioTracks().length);
+}
+
+function isAudioEnabled(deviceId: string) {
+  return Boolean(audioEnabled[deviceId]);
+}
+
+function canToggleAudio(deviceId: string) {
+  return isStreaming(deviceId) && hasAudioTrack(deviceId);
+}
+
+function audioButtonLabel(deviceId: string) {
+  if (!hasAudioTrack(deviceId)) {
+    return t("live.audioUnavailable");
+  }
+  return isAudioEnabled(deviceId) ? t("live.audioOn") : t("live.audioOff");
+}
+
+function applyAudioState(deviceId: string) {
+  const audio = audioRefs.get(deviceId);
+  if (!audio) {
+    return;
+  }
+  const enabled = isAudioEnabled(deviceId);
+  audio.muted = !enabled;
+  if (enabled) {
+    audio.volume = 1;
+    audio.play().catch(() => {});
+  }
+}
+
+function toggleAudio(deviceId: string) {
+  if (!canToggleAudio(deviceId)) {
+    return;
+  }
+  audioEnabled[deviceId] = !audioEnabled[deviceId];
+  applyAudioState(deviceId);
 }
 
 function toggleControl(deviceId: string) {
-  if (!isStreaming(deviceId)) {
+  if (!isStreaming(deviceId) || !isInputAvailable(deviceId)) {
     return;
   }
   controlEnabled[deviceId] = !controlEnabled[deviceId];
@@ -339,6 +478,9 @@ function overlayButtonLabel(deviceId: string) {
 }
 
 function emitCommand(deviceId: string, type: DeviceCommandType) {
+  if (!isInputAvailable(deviceId)) {
+    return;
+  }
   emit("command", deviceId, { type });
 }
 
@@ -350,6 +492,10 @@ function streamButtonLabel(device: Device) {
 }
 
 function connectionState(deviceId: string) {
+  const device = resolveDevice(deviceId);
+  if (deviceUnavailable(device)) {
+    return "offline";
+  }
   if (hasStream(deviceId)) {
     return "connected";
   }
@@ -365,6 +511,13 @@ function connectionStateClass(deviceId: string) {
 
 function connectionStateLabel(deviceId: string) {
   const state = connectionState(deviceId);
+  const device = resolveDevice(deviceId);
+  if (device && isClientOffline(device)) {
+    return t("live.clientOffline");
+  }
+  if (device && device.status && device.status !== "device") {
+    return deviceStatusLabel(device.status);
+  }
   if (state === "connected") {
     return t("live.connectionConnected");
   }
@@ -375,6 +528,10 @@ function connectionStateLabel(deviceId: string) {
 }
 
 function hasStream(deviceId: string) {
+  const device = resolveDevice(deviceId);
+  if (deviceUnavailable(device)) {
+    return false;
+  }
   const connection = props.liveConnections[deviceId];
   if (!connection) {
     return false;
@@ -386,6 +543,10 @@ function hasStream(deviceId: string) {
 }
 
 function isStreaming(deviceId: string) {
+  const device = resolveDevice(deviceId);
+  if (deviceUnavailable(device)) {
+    return false;
+  }
   return Boolean(props.liveConnections[deviceId]);
 }
 
@@ -402,6 +563,13 @@ function mjpegSrc(deviceId: string) {
 }
 
 function livePlaceholder(deviceId: string) {
+  const device = resolveDevice(deviceId);
+  if (device && isClientOffline(device)) {
+    return t("live.clientOffline");
+  }
+  if (device && device.status && device.status !== "device") {
+    return deviceStatusLabel(device.status);
+  }
   const connection = props.liveConnections[deviceId];
   if (!connection) {
     return props.liveMessages[deviceId] || t("live.streamStopped");
@@ -432,16 +600,72 @@ function setImageRef(deviceId: string, el: Element | ComponentPublicInstance | n
   imageRefs.delete(deviceId);
 }
 
+function setAudioRef(deviceId: string, el: Element | ComponentPublicInstance | null) {
+  if (el instanceof HTMLAudioElement) {
+    audioRefs.set(deviceId, el);
+    syncStreams();
+    return;
+  }
+  audioRefs.delete(deviceId);
+}
+
+function updateTrackStream(
+  deviceId: string,
+  tracks: MediaStreamTrack[],
+  cache: Map<string, MediaStream>,
+) {
+  if (!tracks.length) {
+    const existing = cache.get(deviceId);
+    if (existing) {
+      existing.getTracks().forEach((track) => existing.removeTrack(track));
+      cache.delete(deviceId);
+    }
+    return null;
+  }
+  let stream = cache.get(deviceId);
+  if (!stream) {
+    stream = new MediaStream();
+    cache.set(deviceId, stream);
+  }
+  const desired = new Set(tracks.map((track) => track.id));
+  const current = stream.getTracks();
+  current.forEach((track) => {
+    if (!desired.has(track.id)) {
+      stream?.removeTrack(track);
+    }
+  });
+  tracks.forEach((track) => {
+    if (!current.some((item) => item.id === track.id)) {
+      stream?.addTrack(track);
+    }
+  });
+  return stream;
+}
+
 function attachStream(deviceId: string, stream: MediaStream | null) {
   const video = videoRefs.get(deviceId);
+  const audio = audioRefs.get(deviceId);
   if (!video) {
     return;
   }
-  if (video.srcObject !== stream) {
-    video.srcObject = stream || null;
-    if (stream) {
+  const videoTracks = stream?.getVideoTracks() || [];
+  const audioTracks = stream?.getAudioTracks() || [];
+  const videoStream = updateTrackStream(deviceId, videoTracks, videoStreams);
+  const audioStream = updateTrackStream(deviceId, audioTracks, audioStreams);
+  if (video.srcObject !== videoStream) {
+    video.srcObject = videoStream;
+    if (videoStream) {
       video.play().catch(() => {});
     }
+  }
+  if (audio) {
+    if (audio.srcObject !== audioStream) {
+      audio.srcObject = audioStream;
+      if (audioStream) {
+        audio.play().catch(() => {});
+      }
+    }
+    applyAudioState(deviceId);
   }
 }
 
@@ -465,6 +689,11 @@ function syncStreams() {
   Object.keys(controlEnabled).forEach((deviceId) => {
     if (!props.liveConnections[deviceId]) {
       delete controlEnabled[deviceId];
+    }
+  });
+  Object.keys(audioEnabled).forEach((deviceId) => {
+    if (!props.liveConnections[deviceId]) {
+      delete audioEnabled[deviceId];
     }
   });
 }
@@ -497,9 +726,10 @@ function frameStyle(deviceId: string) {
 
 function mapPoint(
   deviceId: string,
-  event: PointerEvent,
+  event: MouseEvent,
+  sourceOverride?: ScreenSize,
 ): TapPayload | null {
-  const source = getSourceSize(deviceId);
+  const source = sourceOverride ?? getSourceSize(deviceId);
   if (!source) {
     return null;
   }
@@ -554,7 +784,11 @@ function onPointerDown(deviceId: string, event: PointerEvent) {
   if (event.button !== 0) {
     return;
   }
-  const point = mapPoint(deviceId, event);
+  const source = getSourceSize(deviceId);
+  if (!source) {
+    return;
+  }
+  const point = mapPoint(deviceId, event, source);
   if (!point) {
     return;
   }
@@ -566,9 +800,19 @@ function onPointerDown(deviceId: string, event: PointerEvent) {
     pointerId: event.pointerId,
     start: point,
     last: point,
+    lastSent: point,
     startTime: performance.now(),
+    lastSentTime: performance.now(),
     moved: false,
+    screen: source,
   };
+  emit("command", deviceId, {
+    type: "touch_down",
+    x: point.x,
+    y: point.y,
+    screen_width: source.width,
+    screen_height: source.height,
+  });
   event.preventDefault();
 }
 
@@ -577,15 +821,71 @@ function onPointerMove(deviceId: string, event: PointerEvent) {
   if (!state || state.pointerId !== event.pointerId) {
     return;
   }
-  const point = mapPoint(deviceId, event);
+  const point = mapPoint(deviceId, event, state.screen);
   if (!point) {
     return;
   }
   state.last = point;
   const dx = point.x - state.start.x;
   const dy = point.y - state.start.y;
-  if (Math.hypot(dx, dy) >= dragThreshold) {
-    state.moved = true;
+  const distance = Math.hypot(dx, dy);
+  let justMoved = false;
+  if (!state.moved) {
+    const elapsed = performance.now() - state.startTime;
+    if (
+      distance >= dragQuickStartDistance ||
+      (distance >= dragThreshold && elapsed >= dragStartDelay)
+    ) {
+      state.moved = true;
+      justMoved = true;
+    } else {
+      event.preventDefault();
+      return;
+    }
+  }
+  if (!state.moved) {
+    event.preventDefault();
+    return;
+  }
+  const now = performance.now();
+  if (justMoved) {
+    emit("command", deviceId, {
+      type: "touch_move",
+      x: point.x,
+      y: point.y,
+      screen_width: state.screen.width,
+      screen_height: state.screen.height,
+    });
+    state.lastSent = point;
+    state.lastSentTime = now;
+    event.preventDefault();
+    return;
+  }
+  if (!state.lastSentTime || now - state.lastSentTime >= dragEmitInterval) {
+    emit("command", deviceId, {
+      type: "touch_move",
+      x: point.x,
+      y: point.y,
+      screen_width: state.screen.width,
+      screen_height: state.screen.height,
+    });
+    state.lastSent = point;
+    state.lastSentTime = now;
+    event.preventDefault();
+    return;
+  }
+  const segDx = point.x - state.lastSent.x;
+  const segDy = point.y - state.lastSent.y;
+  if (Math.hypot(segDx, segDy) >= dragMinSegment) {
+    emit("command", deviceId, {
+      type: "touch_move",
+      x: point.x,
+      y: point.y,
+      screen_width: state.screen.width,
+      screen_height: state.screen.height,
+    });
+    state.lastSent = point;
+    state.lastSentTime = now;
   }
   event.preventDefault();
 }
@@ -595,24 +895,14 @@ function onPointerUp(deviceId: string, event: PointerEvent) {
   if (!state || state.pointerId !== event.pointerId) {
     return;
   }
-  const point = mapPoint(deviceId, event) || state.last;
-  const dx = point.x - state.start.x;
-  const dy = point.y - state.start.y;
-  const durationMs = Math.min(
-    1200,
-    Math.max(80, Math.round(performance.now() - state.startTime)),
-  );
-  if (state.moved && Math.hypot(dx, dy) >= dragThreshold) {
-    emit("swipe", deviceId, {
-      x1: state.start.x,
-      y1: state.start.y,
-      x2: point.x,
-      y2: point.y,
-      duration_ms: durationMs,
-    });
-  } else {
-    emit("tap", deviceId, { x: state.start.x, y: state.start.y });
-  }
+  const point = mapPoint(deviceId, event, state.screen) || state.last;
+  emit("command", deviceId, {
+    type: "touch_up",
+    x: point.x,
+    y: point.y,
+    screen_width: state.screen.width,
+    screen_height: state.screen.height,
+  });
   interactions[deviceId] = undefined;
   event.preventDefault();
 }
@@ -622,8 +912,131 @@ function onPointerCancel(deviceId: string, event: PointerEvent) {
   if (!state || state.pointerId !== event.pointerId) {
     return;
   }
+  emit("command", deviceId, {
+    type: "touch_up",
+    x: state.last.x,
+    y: state.last.y,
+    screen_width: state.screen.width,
+    screen_height: state.screen.height,
+  });
   interactions[deviceId] = undefined;
   event.preventDefault();
+}
+
+function onWheel(deviceId: string, event: WheelEvent) {
+  if (!wheelEnabled || !isControlEnabled(deviceId)) {
+    return;
+  }
+  if (!isInputAvailable(deviceId)) {
+    return;
+  }
+  const source = getSourceSize(deviceId);
+  if (!source) {
+    return;
+  }
+  const point = mapPoint(deviceId, event, source);
+  if (!point) {
+    return;
+  }
+  const now = performance.now();
+  const state =
+    wheelState[deviceId] ||
+    (wheelState[deviceId] = {
+      lastSent: 0,
+      accumX: 0,
+      accumY: 0,
+      axis: null,
+      sign: 0,
+      timerId: null,
+      point: null,
+      screen: null,
+    });
+  const modeScale =
+    (event.deltaMode === 1 ? 36 : event.deltaMode === 2 ? 320 : 1) * wheelScale;
+  let dx = event.deltaX * modeScale;
+  let dy = event.deltaY * modeScale;
+  if (event.shiftKey && Math.abs(dx) < Math.abs(dy)) {
+    dx = dy;
+    dy = 0;
+  }
+  if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) {
+    return;
+  }
+  const axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+  const rawDelta = axis === "x" ? dx : dy;
+  if (!rawDelta) {
+    return;
+  }
+  const sign = rawDelta > 0 ? 1 : -1;
+  if (state.axis && state.axis !== axis) {
+    state.accumX = 0;
+    state.accumY = 0;
+  }
+  if (state.sign && state.sign !== sign) {
+    state.accumX = 0;
+    state.accumY = 0;
+  }
+  state.axis = axis;
+  state.sign = sign;
+  state.point = point;
+  state.screen = source;
+  if (axis === "x") {
+    state.accumX += dx;
+    state.accumY *= 0.3;
+  } else {
+    state.accumY += dy;
+    state.accumX *= 0.3;
+  }
+  if (state.timerId === null) {
+    state.timerId = window.setTimeout(() => flushWheel(deviceId), wheelEmitInterval);
+  }
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function flushWheel(deviceId: string) {
+  const state = wheelState[deviceId];
+  if (!state) {
+    return;
+  }
+  state.timerId = null;
+  const point = state.point;
+  const screen = state.screen;
+  if (!point || !screen) {
+    return;
+  }
+  const axis = state.axis || "y";
+  const raw = axis === "x" ? state.accumX : state.accumY;
+  if (Math.abs(raw) < wheelMinDistance) {
+    return;
+  }
+  const base = axis === "x" ? screen.width : screen.height;
+  const distance = Math.min(Math.abs(raw), Math.round(base * wheelMaxRatio));
+  const direction = raw > 0 ? -1 : 1;
+  const x1 = point.x;
+  const y1 = point.y;
+  const x2 = axis === "x"
+    ? clamp(x1 + direction * distance, 0, screen.width - 1)
+    : x1;
+  const y2 = axis === "x"
+    ? y1
+    : clamp(y1 + direction * distance, 0, screen.height - 1);
+  emit("command", deviceId, {
+    type: "swipe",
+    x1,
+    y1,
+    x2,
+    y2,
+    duration_ms: wheelDurationMs,
+  });
+  state.lastSent = performance.now();
+  if (axis === "x") {
+    state.accumX = 0;
+  } else {
+    state.accumY = 0;
+  }
 }
 
 watch(
@@ -637,8 +1050,12 @@ watch(
 onBeforeUnmount(() => {
   videoRefs.clear();
   imageRefs.clear();
+  audioRefs.clear();
+  videoStreams.clear();
+  audioStreams.clear();
   attachedStreams.clear();
   Object.keys(controlEnabled).forEach((key) => delete controlEnabled[key]);
+  Object.keys(audioEnabled).forEach((key) => delete audioEnabled[key]);
   Object.keys(overlayHidden).forEach((key) => delete overlayHidden[key]);
 });
 </script>

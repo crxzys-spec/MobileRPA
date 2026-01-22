@@ -9,6 +9,8 @@ import type {
   RunMeta,
   RunLogResponse,
   RunRequest,
+  StreamSessionConfigRequest,
+  StreamSessionStatus,
   StepDetails,
   StopRunResponse,
   WebRTCAnswer,
@@ -42,6 +44,51 @@ export const mrpaApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }),
+  getStreamSession: (deviceId: string) =>
+    fetchJson<StreamSessionStatus>(
+      `/api/stream/${encodeURIComponent(deviceId)}/session`,
+    ),
+  startStreamSession: (
+    deviceId: string,
+    payload?: StreamSessionConfigRequest,
+  ) =>
+    fetchJson<StreamSessionStatus>(
+      `/api/stream/${encodeURIComponent(deviceId)}/start`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload ?? {}),
+      },
+    ),
+  restartStreamSession: (
+    deviceId: string,
+    payload?: StreamSessionConfigRequest,
+  ) =>
+    fetchJson<StreamSessionStatus>(
+      `/api/stream/${encodeURIComponent(deviceId)}/restart`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload ?? {}),
+      },
+    ),
+  stopStreamSession: (deviceId: string) =>
+    fetchJson<StreamSessionStatus>(
+      `/api/stream/${encodeURIComponent(deviceId)}/stop`,
+      { method: "POST" },
+    ),
+  updateStreamSessionConfig: (
+    deviceId: string,
+    payload: StreamSessionConfigRequest,
+  ) =>
+    fetchJson<StreamSessionStatus>(
+      `/api/stream/${encodeURIComponent(deviceId)}/config`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    ),
   stopRun: (runId: string) =>
     fetchJson<StopRunResponse>(`/api/runs/${encodeURIComponent(runId)}/stop`, {
       method: "POST",

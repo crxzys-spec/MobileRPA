@@ -1,8 +1,12 @@
 export type DeviceStatus = "device" | "offline" | "unauthorized" | "unknown";
+export type ClientStatus = "online" | "offline" | "unknown";
 
 export interface Device {
   id: string;
   status?: DeviceStatus | string;
+  client_status?: ClientStatus | string;
+  client_last_seen?: number;
+  client_id?: string;
 }
 
 export interface Decision {
@@ -66,6 +70,45 @@ export interface RunLogResponse {
 
 export interface WebrtcConfig {
   ice_servers?: Array<string | RTCIceServer>;
+  mjpeg_available?: boolean;
+  client_mode?: string | null;
+  input_driver?: string | null;
+  input_allow_fallback?: boolean;
+}
+
+export interface StreamSessionConfigRequest {
+  video?: boolean;
+  audio?: boolean;
+  control?: boolean;
+  max_fps?: number;
+  video_bit_rate?: number;
+  max_size?: number;
+  video_codec_options?: string;
+  audio_codec?: string;
+  log_level?: string;
+}
+
+export interface StreamSessionConfig {
+  video: boolean;
+  audio: boolean;
+  control: boolean;
+  max_fps: number;
+  video_bit_rate: number;
+  max_size: number;
+  video_codec_options: string;
+  audio_codec: string;
+  log_level: string;
+}
+
+export interface StreamSessionStatus {
+  device_id: string;
+  status: string;
+  config: StreamSessionConfig;
+  started_at?: number | null;
+  updated_at: number;
+  last_error?: string | null;
+  port?: number | null;
+  scid?: string | null;
 }
 
 export interface RunRequest {
@@ -103,6 +146,9 @@ export interface StopRunResponse {
 export type DeviceCommandType =
   | "tap"
   | "swipe"
+  | "touch_down"
+  | "touch_move"
+  | "touch_up"
   | "keyevent"
   | "input_text"
   | "start_app"
@@ -115,6 +161,8 @@ export interface DeviceCommandRequest {
   type: DeviceCommandType;
   x?: number;
   y?: number;
+  screen_width?: number;
+  screen_height?: number;
   x1?: number;
   y1?: number;
   x2?: number;
@@ -146,6 +194,9 @@ export interface DeviceSession {
   last_error?: string | null;
   created_at: number;
   updated_at: number;
+  client_status?: ClientStatus | string;
+  client_last_seen?: number;
+  client_id?: string;
 }
 
 export interface DeviceQueueClearResponse {

@@ -34,6 +34,11 @@ from av import Packet, VideoFrame
 import cv2
 import numpy as np
 
+from infra.scrcpy.registry import (
+    clear_control_channel,
+    register_control_channel,
+    set_video_active,
+)
 
 DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9:._-]+$")
 
@@ -122,6 +127,7 @@ SCRCPY_READ_TIMEOUT = SETTINGS.scrcpy_read_timeout
 SCRCPY_META_RETRIES = SETTINGS.scrcpy_meta_retries
 SCRCPY_START_DELAY_MS = SETTINGS.scrcpy_start_delay_ms
 SCRCPY_VIDEO_OPTIONS = SETTINGS.scrcpy_video_options
+SCRCPY_AUDIO_CODEC = SETTINGS.scrcpy_audio_codec
 SCRCPY_LOG_LEVEL = SETTINGS.scrcpy_log_level
 WEBRTC_ICE_URLS = SETTINGS.webrtc_ice_urls
 SCRCPY_CODEC_NAMES = {1: "h264", 2: "h265", 3: "av1"}
@@ -131,6 +137,16 @@ _SCREENRECORD_CAPS: Dict[str, bool] = {}
 _SCREEN_SIZE_CACHE: Dict[str, Tuple[int, int]] = {}
 _H264_PROFILE_CACHE: Dict[str, str] = {}
 _SCRCPY_PROFILE_CACHE: Dict[str, str] = {}
+_SCRCPY_SESSION_MANAGER = None
+
+
+def set_scrcpy_session_manager(manager) -> None:
+    global _SCRCPY_SESSION_MANAGER
+    _SCRCPY_SESSION_MANAGER = manager
+
+
+def _get_scrcpy_session_manager():
+    return _SCRCPY_SESSION_MANAGER
 
 
 def _validate_device_id(device_id: str) -> str:
@@ -503,7 +519,21 @@ def _scrcpy_read_codec_meta(
 ) -> Optional[Tuple[str, int, int, bytes]]:
     deadline = time.time() + max(1, timeout or SCRCPY_READ_TIMEOUT)
     buffer = bytearray()
-    max_buffer = 2048
+    max_buffer = 8192
+
+    def parse_at(offset: int) -> Optional[Tuple[str, int, int, bytes]]:
+        if offset < 0 or offset + 12 > len(buffer):
+            return None
+        codec_name = _scrcpy_decode_codec_id(buffer[offset : offset + 4])
+        if codec_name not in ("h264", "h265", "av1"):
+            return None
+        width = int.from_bytes(buffer[offset + 4 : offset + 8], "big")
+        height = int.from_bytes(buffer[offset + 8 : offset + 12], "big")
+        if width <= 0 or height <= 0 or width > 10000 or height > 10000:
+            return None
+        leftover = bytes(buffer[offset + 12 :])
+        return codec_name, width, height, leftover
+
     while time.time() < deadline:
         try:
             chunk = sock.recv(64)
@@ -512,22 +542,54 @@ def _scrcpy_read_codec_meta(
         except OSError:
             return None
         if not chunk:
+            if SCRCPY_LOG_LEVEL:
+                print(
+                    "[scrcpy] meta socket closed",
+                    len(buffer),
+                    buffer[:64].hex(),
+                    flush=True,
+                )
             return None
         buffer.extend(chunk)
         if len(buffer) > max_buffer:
             del buffer[: len(buffer) - max_buffer]
-        if len(buffer) < 12:
-            continue
-        for i in range(len(buffer) - 11):
-            codec_name = _scrcpy_decode_codec_id(buffer[i : i + 4])
-            if codec_name not in ("h264", "h265", "av1"):
-                continue
-            width = int.from_bytes(buffer[i + 4 : i + 8], "big")
-            height = int.from_bytes(buffer[i + 8 : i + 12], "big")
-            if width <= 0 or height <= 0 or width > 10000 or height > 10000:
-                continue
-            leftover = bytes(buffer[i + 12 :])
-            return codec_name, width, height, leftover
+        offsets = []
+        if len(buffer) >= 12:
+            offsets.append(0)
+        if len(buffer) >= 13 and buffer[0] == 0:
+            offsets.append(1)
+        if len(buffer) >= 3 and buffer[0] == 0:
+            length = int.from_bytes(buffer[1:3], "big")
+            if 0 < length <= 512:
+                offsets.append(3 + length)
+        if len(buffer) >= 5 and buffer[0] == 0:
+            length = int.from_bytes(buffer[1:5], "big")
+            if 0 < length <= 4096:
+                offsets.append(5 + length)
+        if len(buffer) >= 2:
+            length = int.from_bytes(buffer[0:2], "big")
+            if 0 < length <= 512:
+                offsets.append(2 + length)
+        if len(buffer) >= 4:
+            length = int.from_bytes(buffer[0:4], "big")
+            if 0 < length <= 4096:
+                offsets.append(4 + length)
+        for offset in sorted(set(offsets)):
+            result = parse_at(offset)
+            if result:
+                return result
+        if len(buffer) >= 12:
+            for i in range(len(buffer) - 11):
+                result = parse_at(i)
+                if result:
+                    return result
+    if buffer and SCRCPY_LOG_LEVEL:
+        print(
+            "[scrcpy] meta buffer",
+            len(buffer),
+            buffer[:64].hex(),
+            flush=True,
+        )
     return None
 
 
@@ -1464,12 +1526,8 @@ def _build_scrcpy_server_cmd(device_id: str, scid: str) -> List[str]:
         *(["log_level={}".format(SCRCPY_LOG_LEVEL)] if SCRCPY_LOG_LEVEL else []),
         "tunnel_forward=true",
         "audio=false",
-        "control=false",
+        "control=true",
         "cleanup=false",
-        "send_device_meta=false",
-        "send_dummy_byte=false",
-        "send_codec_meta=true",
-        "send_frame_meta=true",
         "video_codec=h264",
         "max_fps={}".format(max(1, STREAM_FPS)),
         "video_bit_rate={}".format(max(1, STREAM_BITRATE)),
@@ -1485,16 +1543,26 @@ def _scrcpy_wait_for_socket(
     device_id: str, scid: str, timeout: int
 ) -> bool:
     deadline = time.time() + max(1, timeout)
-    target = "scrcpy_{}".format(scid)
+    target = "@scrcpy_{}".format(scid)
     while time.time() < deadline:
         result = subprocess.run(
-            [ADB_PATH, "-s", device_id, "shell", "ls", "/dev/socket"],
+            [ADB_PATH, "-s", device_id, "shell", "cat", "/proc/net/unix"],
             capture_output=True,
             text=True,
             timeout=5,
         )
-        if result.returncode == 0 and target in (result.stdout or ""):
+        output = result.stdout or ""
+        if result.returncode == 0 and (
+            target in output or target[1:] in output
+        ):
             return True
+        if result.returncode != 0 and SCRCPY_LOG_LEVEL:
+            print(
+                "[scrcpy] socket probe failed",
+                result.returncode,
+                (result.stderr or "").strip(),
+                flush=True,
+            )
         time.sleep(0.2)
     return False
 
@@ -1573,6 +1641,7 @@ class ScrcpyH264Track(MediaStreamTrack):
         self._restart_event = threading.Event()
         self._lock = threading.Lock()
         self._socket: Optional[socket.socket] = None
+        self._control_socket: Optional[socket.socket] = None
         self._process: Optional[subprocess.Popen] = None
         self._port: Optional[int] = None
         self._length_size: Optional[int] = None
@@ -1606,9 +1675,11 @@ class ScrcpyH264Track(MediaStreamTrack):
     def _stop_session(self) -> None:
         with self._lock:
             sock = self._socket
+            control_sock = self._control_socket
             process = self._process
             port = self._port
             self._socket = None
+            self._control_socket = None
             self._process = None
             self._port = None
         if sock:
@@ -1616,6 +1687,13 @@ class ScrcpyH264Track(MediaStreamTrack):
                 sock.close()
             except OSError:
                 pass
+        if control_sock:
+            try:
+                control_sock.close()
+            except OSError:
+                pass
+        clear_control_channel(self._device_id)
+        set_video_active(self._device_id, False)
         _terminate_process(process)
         _scrcpy_forward_remove(self._device_id, port)
 
@@ -1623,8 +1701,6 @@ class ScrcpyH264Track(MediaStreamTrack):
         if self._stop_event.is_set():
             return
         self._need_keyframe = True
-        self._restart_event.set()
-        self._stop_session()
 
     def _reader(self) -> None:
         while not self._stop_event.is_set():
@@ -1643,20 +1719,34 @@ class ScrcpyH264Track(MediaStreamTrack):
                 if SCRCPY_START_DELAY_MS > 0:
                     time.sleep(SCRCPY_START_DELAY_MS / 1000.0)
                 self._set_session(process, port, None)
-                meta = None
                 buffer = bytearray()
-                for _ in range(max(1, SCRCPY_META_RETRIES)):
-                    sock = _scrcpy_connect_socket(port, SCRCPY_CONNECT_TIMEOUT)
-                    self._set_session(process, port, sock)
-                    meta = _scrcpy_read_codec_meta(sock, SCRCPY_READ_TIMEOUT)
-                    if meta:
-                        break
+                sock = _scrcpy_connect_socket(port, SCRCPY_CONNECT_TIMEOUT)
+                self._set_session(process, port, sock)
+                set_video_active(self._device_id, True)
+                if self._control_socket is None:
+                    control_sock = None
                     try:
-                        sock.close()
-                    except OSError:
-                        pass
-                    sock = None
-                    time.sleep(0.2)
+                        control_sock = _scrcpy_connect_socket(
+                            port, SCRCPY_CONNECT_TIMEOUT
+                        )
+                        self._control_socket = control_sock
+                        register_control_channel(
+                            self._device_id, control_sock
+                        )
+                    except Exception as exc:
+                        if control_sock:
+                            try:
+                                control_sock.close()
+                            except OSError:
+                                pass
+                        print(
+                            "[webrtc] scrcpy control socket error",
+                            self._device_id,
+                            str(exc),
+                            flush=True,
+                        )
+                meta_timeout = SCRCPY_READ_TIMEOUT * max(1, SCRCPY_META_RETRIES)
+                meta = _scrcpy_read_codec_meta(sock, meta_timeout)
                 if not meta:
                     exit_code = process.poll() if process else None
                     print(
@@ -1664,6 +1754,8 @@ class ScrcpyH264Track(MediaStreamTrack):
                         self._device_id,
                         "exit",
                         exit_code,
+                        "timeout",
+                        meta_timeout,
                         flush=True,
                     )
                     continue
@@ -2049,6 +2141,14 @@ def _select_webrtc_track(
 ) -> MediaStreamTrack:
     source = (source_override or WEBRTC_SOURCE).strip().lower()
     if source in ("scrcpy", "auto"):
+        manager = _get_scrcpy_session_manager()
+        if manager is not None:
+            try:
+                return manager.create_track(device_id, loop)
+            except RuntimeError as exc:
+                raise HTTPException(
+                    status_code=409, detail=str(exc)
+                ) from exc
         return ScrcpyH264Track(device_id, loop)
     raise HTTPException(status_code=400, detail="only scrcpy source supported")
 
@@ -2070,13 +2170,22 @@ pcs: Set[RTCPeerConnection] = set()
 
 
 def shutdown() -> None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop and loop.is_running():
+        for pc in list(pcs):
+            loop.create_task(pc.close())
+        pcs.clear()
+        return
+    asyncio.run(shutdown_async())
+
+
+async def shutdown_async() -> None:
     coros = [pc.close() for pc in pcs]
     if coros:
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(asyncio.gather(*coros, return_exceptions=True))
-        finally:
-            loop.close()
+        await asyncio.gather(*coros, return_exceptions=True)
     pcs.clear()
 
 
@@ -2122,6 +2231,37 @@ async def webrtc_offer(payload: WebRTCOffer) -> RTCSessionDescription:
     loop = asyncio.get_running_loop()
     _require_binary(ADB_PATH, "adb")
     _require_binary(SCRCPY_SERVER_PATH, "scrcpy-server")
+    manager = _get_scrcpy_session_manager()
+    session_profile = None
+    session_status = None
+    if manager is not None:
+        session = manager.get_session(device_id)
+        if not session:
+            raise HTTPException(
+                status_code=409, detail="scrcpy session not running"
+            )
+        session_status = session.status()
+        if session_status.status not in ("running", "starting"):
+            raise HTTPException(
+                status_code=409, detail="scrcpy session not running"
+            )
+        wait_seconds = max(
+            1.0,
+            min(
+                5.0,
+                SCRCPY_READ_TIMEOUT * max(1, SCRCPY_META_RETRIES),
+            ),
+        )
+        session_profile = await asyncio.to_thread(
+            manager.wait_for_profile, device_id, wait_seconds
+        )
+        if not session_profile:
+            raise HTTPException(
+                status_code=409,
+                detail="scrcpy profile not ready",
+            )
+        session_profile = session_profile.lower()
+        _SCRCPY_PROFILE_CACHE[device_id] = session_profile
     preferred_profile = None
     offer_profiles = _h264_profiles_from_offer(payload.sdp)
     offer_h264_profiles = [
@@ -2131,7 +2271,52 @@ async def webrtc_offer(payload: WebRTCOffer) -> RTCSessionDescription:
     ]
     if not offer_h264_profiles:
         raise HTTPException(status_code=409, detail="client does not offer h264")
-    if FORCED_H264_PROFILE:
+    if session_profile:
+        if session_profile in offer_h264_profiles:
+            preferred_profile = session_profile
+        else:
+            print(
+                "[webrtc] session profile mismatch",
+                device_id,
+                session_profile,
+                "offer",
+                offer_h264_profiles,
+                flush=True,
+            )
+            session_class = None
+            try:
+                session_class, _ = aiortc_sdp.parse_h264_profile_level_id(
+                    session_profile
+                )
+            except ValueError:
+                session_class = None
+            if session_class is not None:
+                for candidate in offer_h264_profiles:
+                    try:
+                        candidate_class, _ = (
+                            aiortc_sdp.parse_h264_profile_level_id(candidate)
+                        )
+                    except ValueError:
+                        continue
+                    if candidate_class == session_class:
+                        preferred_profile = candidate
+                        print(
+                            "[webrtc] session profile fallback",
+                            device_id,
+                            session_profile,
+                            "->",
+                            preferred_profile,
+                            flush=True,
+                        )
+                        break
+            if not preferred_profile:
+                raise HTTPException(
+                    status_code=409,
+                    detail="client does not offer h264 profile {}".format(
+                        session_profile
+                    ),
+                )
+    if not preferred_profile and FORCED_H264_PROFILE:
         if FORCED_H264_PROFILE in offer_h264_profiles:
             preferred_profile = FORCED_H264_PROFILE
             print(
@@ -2149,9 +2334,9 @@ async def webrtc_offer(payload: WebRTCOffer) -> RTCSessionDescription:
                 offer_h264_profiles,
                 flush=True,
             )
-    scrcpy_profile = (
-        _probe_scrcpy_h264_profile_id(device_id) if not preferred_profile else None
-    )
+    scrcpy_profile = None
+    if not preferred_profile:
+        scrcpy_profile = _SCRCPY_PROFILE_CACHE.get(device_id)
     if scrcpy_profile:
         scrcpy_profile = scrcpy_profile.lower()
         if scrcpy_profile in offer_h264_profiles:
@@ -2165,14 +2350,9 @@ async def webrtc_offer(payload: WebRTCOffer) -> RTCSessionDescription:
                 offer_h264_profiles,
                 flush=True,
             )
-            scrcpy_profile = _probe_scrcpy_h264_profile_id(device_id, force=True)
-            if scrcpy_profile:
-                scrcpy_profile = scrcpy_profile.lower()
-                if scrcpy_profile in offer_h264_profiles:
-                    preferred_profile = scrcpy_profile
-    else:
+    elif not preferred_profile and manager is None:
         print(
-            "[webrtc] scrcpy profile not found",
+            "[webrtc] scrcpy profile not cached",
             device_id,
             flush=True,
         )
@@ -2181,8 +2361,22 @@ async def webrtc_offer(payload: WebRTCOffer) -> RTCSessionDescription:
     if preferred_profile:
         _ensure_h264_codec(preferred_profile)
     track = _select_webrtc_track(device_id, loop, "scrcpy")
+    audio_track = None
+    offer_has_audio = "m=audio" in payload.sdp
+    if (
+        manager is not None
+        and session_status is not None
+        and session_status.config.audio
+        and offer_has_audio
+    ):
+        try:
+            audio_track = manager.create_audio_track(device_id, loop)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     sender = pc.addTrack(track)
-    if preferred_profile and isinstance(track, ScrcpyH264Track):
+    if audio_track is not None:
+        pc.addTrack(audio_track)
+    if preferred_profile:
         sender_transceiver = next(
             (item for item in pc.getTransceivers() if item.sender == sender),
             None,
@@ -2201,6 +2395,8 @@ async def webrtc_offer(payload: WebRTCOffer) -> RTCSessionDescription:
             await pc.close()
             pcs.discard(pc)
             track.stop()
+            if audio_track is not None:
+                audio_track.stop()
 
     await pc.setRemoteDescription(RTCSessionDescription(payload.sdp, payload.type))
     answer = await pc.createAnswer()

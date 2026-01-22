@@ -6,7 +6,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-ENV_FILES = (ROOT_DIR / ".env", ROOT_DIR / ".env.example")
+# Only load .env at runtime; .env.example is a template.
+ENV_FILES = (ROOT_DIR / ".env",)
 
 
 class ClientServiceSettings(BaseSettings):

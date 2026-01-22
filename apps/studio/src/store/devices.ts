@@ -57,8 +57,16 @@ export const useDevicesStore = defineStore("devices", () => {
   ) {
     app.clearError();
     try {
+      if (payload.type.startsWith("touch_")) {
+        devicesService
+          .enqueueDeviceCommand(deviceId, payload)
+          .catch((error) => app.setError(error));
+        return null;
+      }
       const result = await devicesService.enqueueDeviceCommand(deviceId, payload);
-      await refreshDeviceSessions();
+      if (!payload.type.startsWith("touch_")) {
+        await refreshDeviceSessions();
+      }
       return result;
     } catch (error) {
       app.setError(error);

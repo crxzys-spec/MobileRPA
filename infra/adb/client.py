@@ -120,6 +120,19 @@ class AdbClient:
     def keyevent(self, keycode):
         self.shell(["input", "keyevent", str(keycode)])
 
+    def motionevent(self, action, x, y):
+        action = str(action).upper()
+        self.shell(["input", "motionevent", action, str(x), str(y)])
+
+    def touch_down(self, x, y):
+        self.motionevent("DOWN", x, y)
+
+    def touch_move(self, x, y):
+        self.motionevent("MOVE", x, y)
+
+    def touch_up(self, x, y):
+        self.motionevent("UP", x, y)
+
     def get_current_ime(self):
         result = self.shell(["settings", "get", "secure", "default_input_method"])
         ime = (result.stdout or "").strip()
